@@ -1,0 +1,15 @@
+[package]
+name = "turing_drawing"
+version = "0.1.0"
+edition = "2021"
+description = "Local Rust + iced port of Turing Drawings"
+license = "BSD-3-Clause"
+readme = "README.md"
+
+[dependencies]
+iced = { version = "0.14", features = ["image-without-codecs", "tokio"] }
+rand = "0.9"
+
+[profile.release]
+lto = true
+codegen-units = 1
