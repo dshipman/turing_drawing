@@ -3,8 +3,7 @@
 use crate::machine::{Machine, MAP_LEN};
 
 pub use crate::machine::{
-    ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT, MAP_HEIGHT, MAP_WIDTH, MAX_STATES, MAX_SYMBOLS,
-    MIN_STATES, MIN_SYMBOLS,
+    MAP_HEIGHT, MAP_WIDTH, MAX_STATES, MAX_SYMBOLS, MIN_STATES, MIN_SYMBOLS,
 };
 
 /// The program: shared grid, shared alphabet size, and the machines that draw on it.
@@ -140,7 +139,7 @@ impl Program {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::Machine;
+    use crate::machine::{Machine, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT};
 
     fn fixed_machine(table: Vec<i32>, start_x: i32, start_y: i32) -> Machine {
         Machine {

@@ -1,3 +1,4 @@
+mod color_picker;
 mod machine;
 mod palette;
 mod program;
@@ -6,16 +7,15 @@ use std::time::{Duration, Instant};
 
 use iced::keyboard::key;
 use iced::widget::{
-    button, canvas, column, container, image, mouse_area, pick_list, row, scrollable, slider, text,
-    text_input, Space,
+    button, column, container, image, mouse_area, row, scrollable, slider, text, text_input, Space,
 };
 use iced::widget::image::{FilterMethod, Handle};
 use iced::{
     clipboard, event, keyboard, time, window, Alignment, Background, Border, Color, ContentFit,
     Element, Event, Length, Size, Subscription, Task, Theme,
 };
-use iced_color_wheel::{color_to_hsv, hsv_to_color, WheelProgram};
 
+use color_picker::{ColorPicker, ControlsMessage, GradientEndpoint};
 use palette::{Palette, PaletteKind, Rgb};
 use program::{Program, MAP_HEIGHT, MAP_WIDTH, MAX_STATES, MAX_SYMBOLS, MIN_STATES, MIN_SYMBOLS};
 
@@ -71,35 +71,7 @@ struct App {
     /// When true, only the drawing is shown (controls and share encodings hidden).
     drawing_only: bool,
     palette: Palette,
-    /// Which gradient endpoint's colour wheel is open, if any.
-    color_picker: Option<GradientEndpoint>,
-    /// HSV state for the open colour picker (kept while picking).
-    picker_hue: f32,
-    picker_saturation: f32,
-    picker_value: f32,
-    /// Hex field inside the colour picker panel.
-    picker_hex: String,
-}
-
-/// Which gradient colour is being edited in the colour wheel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GradientEndpoint {
-    Start,
-    End,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RgbChannel {
-    Red,
-    Green,
-    Blue,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum HsvChannel {
-    Hue,
-    Saturation,
-    Value,
+    color_picker: ColorPicker,
 }
 
 #[derive(Debug, Clone)]
@@ -123,12 +95,7 @@ enum Message {
     PaletteSelected(PaletteKind),
     GradientStartChanged(String),
     GradientEndChanged(String),
-    ToggleColorPicker(GradientEndpoint),
-    CloseColorPicker,
-    PickerHueSatChanged(f32, f32),
-    PickerHsvChanged(HsvChannel, f32),
-    PickerRgbChanged(RgbChannel, f32),
-    PickerHexChanged(String),
+    ColorPicker(color_picker::Message),
 }
 
 impl App {
@@ -153,11 +120,7 @@ impl App {
                 frame,
                 drawing_only: false,
                 palette,
-                color_picker: None,
-                picker_hue: 0.0,
-                picker_saturation: 0.0,
-                picker_value: 1.0,
-                picker_hex: "#000000".into(),
+                color_picker: ColorPicker::new(),
             },
             Task::none(),
         )
@@ -321,8 +284,8 @@ impl App {
             }
             Message::ToggleFullscreen => Self::toggle_fullscreen(),
             Message::Escape => {
-                if self.color_picker.is_some() {
-                    self.color_picker = None;
+                if self.color_picker.is_open() {
+                    self.color_picker.close();
                     return Task::none();
                 }
                 self.drawing_only = false;
@@ -331,7 +294,7 @@ impl App {
             Message::PaletteSelected(kind) => {
                 self.palette.set_kind(kind, self.num_symbols);
                 if kind != PaletteKind::Gradient {
-                    self.color_picker = None;
+                    self.color_picker.close();
                 }
                 self.status = format!("Palette: {kind}");
                 self.refresh_frame();
@@ -341,8 +304,8 @@ impl App {
                 match self.palette.set_gradient_start_hex(hex, self.num_symbols) {
                     Ok(()) => {
                         self.status.clear();
-                        if self.color_picker == Some(GradientEndpoint::Start) {
-                            self.sync_picker_from_rgb(self.palette.gradient_start);
+                        if self.color_picker.open_endpoint() == Some(GradientEndpoint::Start) {
+                            self.color_picker.sync_from_rgb(self.palette.gradient_start);
                         }
                         self.refresh_frame();
                     }
@@ -356,8 +319,8 @@ impl App {
                 match self.palette.set_gradient_end_hex(hex, self.num_symbols) {
                     Ok(()) => {
                         self.status.clear();
-                        if self.color_picker == Some(GradientEndpoint::End) {
-                            self.sync_picker_from_rgb(self.palette.gradient_end);
+                        if self.color_picker.open_endpoint() == Some(GradientEndpoint::End) {
+                            self.color_picker.sync_from_rgb(self.palette.gradient_end);
                         }
                         self.refresh_frame();
                     }
@@ -367,58 +330,16 @@ impl App {
                 }
                 Task::none()
             }
-            Message::ToggleColorPicker(endpoint) => {
-                if self.color_picker == Some(endpoint) {
-                    self.color_picker = None;
-                } else {
-                    let rgb = match endpoint {
-                        GradientEndpoint::Start => self.palette.gradient_start,
-                        GradientEndpoint::End => self.palette.gradient_end,
-                    };
-                    self.sync_picker_from_rgb(rgb);
-                    self.color_picker = Some(endpoint);
-                }
-                Task::none()
-            }
-            Message::CloseColorPicker => {
-                self.color_picker = None;
-                Task::none()
-            }
-            Message::PickerHueSatChanged(h, s) => {
-                self.picker_hue = h;
-                self.picker_saturation = s;
-                self.apply_picker_from_hsv();
-                Task::none()
-            }
-            Message::PickerHsvChanged(channel, value) => {
-                match channel {
-                    HsvChannel::Hue => self.picker_hue = value.rem_euclid(360.0),
-                    HsvChannel::Saturation => self.picker_saturation = value.clamp(0.0, 1.0),
-                    HsvChannel::Value => self.picker_value = value.clamp(0.0, 1.0),
-                }
-                self.apply_picker_from_hsv();
-                Task::none()
-            }
-            Message::PickerRgbChanged(channel, value) => {
-                let mut rgb = self.picker_rgb();
-                let v = value.round().clamp(0.0, 255.0) as u8;
-                match channel {
-                    RgbChannel::Red => rgb[0] = v,
-                    RgbChannel::Green => rgb[1] = v,
-                    RgbChannel::Blue => rgb[2] = v,
-                }
-                self.sync_picker_from_rgb(rgb);
-                self.apply_picker_rgb(rgb);
-                Task::none()
-            }
-            Message::PickerHexChanged(hex) => {
-                self.picker_hex = hex;
-                match palette::parse_hex_rgb(&self.picker_hex) {
-                    Ok(rgb) => {
-                        self.sync_picker_from_rgb(rgb);
-                        self.apply_picker_rgb(rgb);
+            Message::ColorPicker(msg) => {
+                match self
+                    .color_picker
+                    .update(msg, &mut self.palette, self.num_symbols)
+                {
+                    Ok(true) => {
                         self.status.clear();
+                        self.refresh_frame();
                     }
+                    Ok(false) => {}
                     Err(e) => {
                         self.status = format!("Picker colour: {e}");
                     }
@@ -426,166 +347,6 @@ impl App {
                 Task::none()
             }
         }
-    }
-
-    fn picker_rgb(&self) -> Rgb {
-        let color = hsv_to_color(self.picker_hue, self.picker_saturation, self.picker_value);
-        [
-            (color.r * 255.0).round() as u8,
-            (color.g * 255.0).round() as u8,
-            (color.b * 255.0).round() as u8,
-        ]
-    }
-
-    fn sync_picker_from_rgb(&mut self, rgb: Rgb) {
-        let (h, s, v) = color_to_hsv(rgb_color(rgb));
-        self.picker_hue = h;
-        self.picker_saturation = s;
-        self.picker_value = v;
-        self.picker_hex = palette::rgb_to_hex(rgb);
-    }
-
-    fn apply_picker_from_hsv(&mut self) {
-        let rgb = self.picker_rgb();
-        self.picker_hex = palette::rgb_to_hex(rgb);
-        self.apply_picker_rgb(rgb);
-    }
-
-    fn apply_picker_rgb(&mut self, rgb: Rgb) {
-        let Some(endpoint) = self.color_picker else {
-            return;
-        };
-        match endpoint {
-            GradientEndpoint::Start => {
-                self.palette
-                    .set_gradient_start_rgb(rgb, self.num_symbols);
-            }
-            GradientEndpoint::End => {
-                self.palette.set_gradient_end_rgb(rgb, self.num_symbols);
-            }
-        }
-        self.status.clear();
-        self.refresh_frame();
-    }
-
-    fn color_picker_panel(&self, endpoint: GradientEndpoint) -> Element<'_, Message> {
-        let label = match endpoint {
-            GradientEndpoint::Start => "Start colour",
-            GradientEndpoint::End => "End colour",
-        };
-        let rgb = self.picker_rgb();
-
-        let panel = column![
-            row![
-                text(label).size(13),
-                Space::new().width(Length::Fill),
-                button("Close").on_press(Message::CloseColorPicker),
-            ]
-            .align_y(Alignment::Center),
-            container(
-                canvas(WheelProgram::new(
-                    self.picker_hue,
-                    self.picker_saturation,
-                    self.picker_value,
-                    Message::PickerHueSatChanged,
-                ))
-                .width(200)
-                .height(200),
-            )
-            .center_x(Length::Fill),
-            container(Space::new().height(20))
-                .width(Length::Fill)
-                .style(move |_theme: &Theme| container::Style {
-                    background: Some(Background::Color(rgb_color(rgb))),
-                    border: Border {
-                        color: Color::from_rgb(0.4, 0.4, 0.4),
-                        width: 1.0,
-                        radius: 2.0.into(),
-                    },
-                    ..container::Style::default()
-                }),
-            column![
-                text("HSV").size(13),
-                channel_slider(
-                    "H",
-                    0.0..=360.0,
-                    self.picker_hue,
-                    1.0,
-                    format!("{:.0}°", self.picker_hue),
-                    |v| Message::PickerHsvChanged(HsvChannel::Hue, v),
-                ),
-                channel_slider(
-                    "S",
-                    0.0..=1.0,
-                    self.picker_saturation,
-                    0.01,
-                    format!("{:.0}%", self.picker_saturation * 100.0),
-                    |v| Message::PickerHsvChanged(HsvChannel::Saturation, v),
-                ),
-                channel_slider(
-                    "V",
-                    0.0..=1.0,
-                    self.picker_value,
-                    0.01,
-                    format!("{:.0}%", self.picker_value * 100.0),
-                    |v| Message::PickerHsvChanged(HsvChannel::Value, v),
-                ),
-            ]
-            .spacing(4),
-            column![
-                text("RGB").size(13),
-                channel_slider(
-                    "R",
-                    0.0..=255.0,
-                    f32::from(rgb[0]),
-                    1.0,
-                    rgb[0].to_string(),
-                    |v| Message::PickerRgbChanged(RgbChannel::Red, v),
-                ),
-                channel_slider(
-                    "G",
-                    0.0..=255.0,
-                    f32::from(rgb[1]),
-                    1.0,
-                    rgb[1].to_string(),
-                    |v| Message::PickerRgbChanged(RgbChannel::Green, v),
-                ),
-                channel_slider(
-                    "B",
-                    0.0..=255.0,
-                    f32::from(rgb[2]),
-                    1.0,
-                    rgb[2].to_string(),
-                    |v| Message::PickerRgbChanged(RgbChannel::Blue, v),
-                ),
-            ]
-            .spacing(4),
-            row![
-                text("Hex:").width(36),
-                text_input("#RRGGBB", &self.picker_hex)
-                    .on_input(Message::PickerHexChanged)
-                    .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(8);
-
-        scrollable(
-            container(panel)
-                .padding(8)
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
-                    border: Border {
-                        color: Color::from_rgb(0.35, 0.35, 0.35),
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..container::Style::default()
-                }),
-        )
-        .height(Length::Fixed(420.0))
-        .into()
     }
 
     fn run_frame(&mut self) {
@@ -690,67 +451,16 @@ impl App {
             ]
             .spacing(8)
             .align_y(Alignment::Center),
-            row![
-                text("Palette:").width(110),
-                pick_list(
-                    PaletteKind::ALL,
-                    Some(self.palette.kind),
-                    Message::PaletteSelected,
-                )
-                .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
+            color_picker::palette_controls(&self.palette, &self.color_picker).map(|msg| match msg {
+                ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
+                ControlsMessage::GradientStartChanged(hex) => Message::GradientStartChanged(hex),
+                ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
+                ControlsMessage::Picker(m) => Message::ColorPicker(m),
+            }),
         ]
         .spacing(6)
         .width(380)
         .padding(8);
-
-        let mut swatches = row![].spacing(4);
-        for &c in &self.palette.colors {
-            swatches = swatches.push(color_swatch(c, 28.0, 18.0));
-        }
-        let mut controls = controls.push(swatches);
-
-        if self.palette.kind == PaletteKind::Gradient {
-            controls = controls
-                .push(
-                    row![
-                        text("Start:").width(110),
-                        clickable_color_swatch(
-                            self.palette.gradient_start,
-                            28.0,
-                            22.0,
-                            Message::ToggleColorPicker(GradientEndpoint::Start),
-                        ),
-                        text_input("#RRGGBB", &self.palette.gradient_start_hex)
-                            .on_input(Message::GradientStartChanged)
-                            .width(Length::Fill),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .push(
-                    row![
-                        text("End:").width(110),
-                        clickable_color_swatch(
-                            self.palette.gradient_end,
-                            28.0,
-                            22.0,
-                            Message::ToggleColorPicker(GradientEndpoint::End),
-                        ),
-                        text_input("#RRGGBB", &self.palette.gradient_end_hex)
-                            .on_input(Message::GradientEndChanged)
-                            .width(Length::Fill),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                );
-
-            if let Some(endpoint) = self.color_picker {
-                controls = controls.push(self.color_picker_panel(endpoint));
-            }
-        }
 
         let controls = controls
             .push(Space::new().height(8))
@@ -861,51 +571,4 @@ fn fill_rgba_from_map(map: &[i32], pixels: &mut [u8], colors: &[Rgb; MAX_SYMBOLS
         pixels[o + 2] = c[2];
         pixels[o + 3] = 255;
     }
-}
-
-fn rgb_color(rgb: Rgb) -> Color {
-    Color::from_rgb8(rgb[0], rgb[1], rgb[2])
-}
-
-fn color_swatch(rgb: Rgb, width: f32, height: f32) -> Element<'static, Message> {
-    container(Space::new().width(width).height(height))
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(Background::Color(rgb_color(rgb))),
-            border: Border {
-                color: Color::from_rgb(0.4, 0.4, 0.4),
-                width: 1.0,
-                radius: 2.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
-}
-
-fn clickable_color_swatch(
-    rgb: Rgb,
-    width: f32,
-    height: f32,
-    on_press: Message,
-) -> Element<'static, Message> {
-    mouse_area(color_swatch(rgb, width, height))
-        .on_press(on_press)
-        .into()
-}
-
-fn channel_slider<'a>(
-    label: &'a str,
-    range: std::ops::RangeInclusive<f32>,
-    value: f32,
-    step: f32,
-    value_label: String,
-    on_change: impl Fn(f32) -> Message + 'a,
-) -> Element<'a, Message> {
-    row![
-        text(label).width(18),
-        slider(range, value, on_change).step(step),
-        text(value_label).width(48).align_x(Alignment::End),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center)
-    .into()
 }

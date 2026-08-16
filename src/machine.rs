@@ -12,9 +12,9 @@ pub const MAP_LEN: usize = MAP_WIDTH * MAP_HEIGHT;
 
 pub const ACTION_LEFT: i32 = 0;
 pub const ACTION_RIGHT: i32 = 1;
-pub const ACTION_UP: i32 = 2;
+const ACTION_UP: i32 = 2;
 pub const ACTION_DOWN: i32 = 3;
-pub const NUM_ACTIONS: i32 = 4;
+const NUM_ACTIONS: i32 = 4;
 
 pub const MIN_STATES: usize = 1;
 pub const MAX_STATES: usize = 32;

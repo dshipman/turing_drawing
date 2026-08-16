@@ -40,7 +40,7 @@ impl std::fmt::Display for PaletteKind {
 }
 
 /// Original Turing Drawings `colorMap`.
-pub const CLASSIC: [Rgb; MAX_SYMBOLS] = [
+const CLASSIC: [Rgb; MAX_SYMBOLS] = [
     [255, 0, 0],     // Initial symbol (untouched)
     [0, 0, 0],       // Black
     [255, 255, 255], // White
@@ -198,15 +198,11 @@ impl Palette {
 }
 
 /// Linear RGB gradient across `num_symbols` slots; unused slots copy the end colour.
-pub fn gradient_colors(start: Rgb, end: Rgb, num_symbols: usize) -> [Rgb; MAX_SYMBOLS] {
+fn gradient_colors(start: Rgb, end: Rgb, num_symbols: usize) -> [Rgb; MAX_SYMBOLS] {
     let n = num_symbols.clamp(2, MAX_SYMBOLS);
     let mut colors = [end; MAX_SYMBOLS];
     for (i, slot) in colors.iter_mut().enumerate().take(n) {
-        let t = if n == 1 {
-            0.0
-        } else {
-            i as f32 / (n - 1) as f32
-        };
+        let t = i as f32 / (n - 1) as f32;
         *slot = lerp_rgb(start, end, t);
     }
     colors
