@@ -2,7 +2,7 @@
 
 A local desktop port of [Turing Drawings](https://maximecb.github.io/Turing-Drawings/) by Maxime Chevalier-Boisvert.
 
-Randomly generated 2D Turing machines draw generative art on a wrapping grid. Multiple machines can share the same canvas: they must use the same number of states and symbols, but each has its own rules and start position. This reimplementation keeps the original transition-table layout, action quirks, and color palette. Original website `#hash` encodings still load (start position defaults to `(0,0)`).
+Randomly generated 2D Turing machines draw generative art on a wrapping grid. Multiple machines can share the same canvas: they must use the same number of states and symbols, but each has its own rules and start position. This reimplementation keeps the original transition-table layout and action quirks; the Classic palette matches the original colours, and other palettes (including a custom gradient) can recolor drawings at render time. Original website `#hash` encodings still load (start position defaults to `(0,0)`).
 
 ## Requirements
 
@@ -20,6 +20,7 @@ Debug builds work but the simulation is much slower; prefer `--release`.
 ## Controls
 
 - **Num states / Num symbols** — size of every machine's transition table (defaults: 4 / 3)
+- **Palette** — recolor the drawing without changing machine rules. Presets: Classic (original), Grayscale, Sunset, Ocean, Neon. **Gradient** builds colours from user-chosen start and end colours, spanning the current number of symbols (slot 0 = start / untouched background; last active slot = end). Click a start/end swatch for a full colour picker (wheel, HSV, RGB, hex). Changing Num symbols regenerates the gradient.
 - **Random** — generate new rules and start positions for every machine
 - **Restart** — clear the grid and send each head back to its start without changing rules
 - **Add machine** — append another random machine and reset the drawing

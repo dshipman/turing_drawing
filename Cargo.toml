@@ -7,7 +7,8 @@ license = "BSD-3-Clause"
 readme = "README.md"
 
 [dependencies]
-iced = { version = "0.14", features = ["image-without-codecs", "tokio"] }
+iced = { version = "0.14", features = ["canvas", "image-without-codecs", "tokio"] }
+iced_color_wheel = "0.1"
 rand = "0.9"
 
 [profile.release]

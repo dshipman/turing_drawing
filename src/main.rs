@@ -1,31 +1,23 @@
 mod machine;
+mod palette;
 mod program;
 
 use std::time::{Duration, Instant};
 
 use iced::keyboard::key;
 use iced::widget::{
-    button, column, container, image, mouse_area, row, scrollable, slider, text, text_input, Space,
+    button, canvas, column, container, image, mouse_area, pick_list, row, scrollable, slider, text,
+    text_input, Space,
 };
 use iced::widget::image::{FilterMethod, Handle};
 use iced::{
     clipboard, event, keyboard, time, window, Alignment, Background, Border, Color, ContentFit,
     Element, Event, Length, Size, Subscription, Task, Theme,
 };
+use iced_color_wheel::{color_to_hsv, hsv_to_color, WheelProgram};
 
+use palette::{Palette, PaletteKind, Rgb};
 use program::{Program, MAP_HEIGHT, MAP_WIDTH, MAX_STATES, MAX_SYMBOLS, MIN_STATES, MIN_SYMBOLS};
-
-/// RGB triples matching the original `colorMap` (symbol index → color).
-const COLOR_MAP: [[u8; 3]; 8] = [
-    [255, 0, 0],     // Initial symbol (untouched)
-    [0, 0, 0],       // Black
-    [255, 255, 255], // White
-    [0, 255, 0],     // Green
-    [0, 0, 255],     // Blue
-    [255, 255, 0],   // Yellow
-    [0, 255, 255],   // Cyan
-    [255, 0, 255],   // Magenta
-];
 
 const UPDATE_TIME: Duration = Duration::from_millis(40);
 const UPDATE_ITRS: u64 = 350_000;
@@ -78,6 +70,36 @@ struct App {
     frame: Handle,
     /// When true, only the drawing is shown (controls and share encodings hidden).
     drawing_only: bool,
+    palette: Palette,
+    /// Which gradient endpoint's colour wheel is open, if any.
+    color_picker: Option<GradientEndpoint>,
+    /// HSV state for the open colour picker (kept while picking).
+    picker_hue: f32,
+    picker_saturation: f32,
+    picker_value: f32,
+    /// Hex field inside the colour picker panel.
+    picker_hex: String,
+}
+
+/// Which gradient colour is being edited in the colour wheel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GradientEndpoint {
+    Start,
+    End,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RgbChannel {
+    Red,
+    Green,
+    Blue,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HsvChannel {
+    Hue,
+    Saturation,
+    Value,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +120,15 @@ enum Message {
     ToggleDrawingOnly,
     ToggleFullscreen,
     Escape,
+    PaletteSelected(PaletteKind),
+    GradientStartChanged(String),
+    GradientEndChanged(String),
+    ToggleColorPicker(GradientEndpoint),
+    CloseColorPicker,
+    PickerHueSatChanged(f32, f32),
+    PickerHsvChanged(HsvChannel, f32),
+    PickerRgbChanged(RgbChannel, f32),
+    PickerHexChanged(String),
 }
 
 impl App {
@@ -106,7 +137,8 @@ impl App {
         let num_symbols = 3;
         let program = Program::new_random(num_states, num_symbols);
         let share_texts = vec![program.machine_encoding(0)];
-        let pixels = rgba_from_map(&program.map);
+        let palette = Palette::classic();
+        let pixels = rgba_from_map(&program.map, &palette.colors);
         let frame = Handle::from_rgba(MAP_WIDTH as u32, MAP_HEIGHT as u32, pixels.clone());
 
         (
@@ -120,6 +152,12 @@ impl App {
                 pixels,
                 frame,
                 drawing_only: false,
+                palette,
+                color_picker: None,
+                picker_hue: 0.0,
+                picker_saturation: 0.0,
+                picker_value: 1.0,
+                picker_hex: "#000000".into(),
             },
             Task::none(),
         )
@@ -184,12 +222,16 @@ impl App {
             Message::IncSymbols => {
                 if self.num_symbols < MAX_SYMBOLS {
                     self.num_symbols += 1;
+                    self.palette.resolve(self.num_symbols);
+                    self.refresh_frame();
                 }
                 Task::none()
             }
             Message::DecSymbols => {
                 if self.num_symbols > MIN_SYMBOLS {
                     self.num_symbols -= 1;
+                    self.palette.resolve(self.num_symbols);
+                    self.refresh_frame();
                 }
                 Task::none()
             }
@@ -261,6 +303,7 @@ impl App {
                     Ok(()) => {
                         self.num_states = self.program.num_states;
                         self.num_symbols = self.program.num_symbols;
+                        self.palette.resolve(self.num_symbols);
                         self.sync_share_texts();
                         self.status = format!("Loaded encoding for machine {}", i + 1);
                         self.refresh_frame();
@@ -278,10 +321,271 @@ impl App {
             }
             Message::ToggleFullscreen => Self::toggle_fullscreen(),
             Message::Escape => {
+                if self.color_picker.is_some() {
+                    self.color_picker = None;
+                    return Task::none();
+                }
                 self.drawing_only = false;
                 Self::exit_fullscreen_if_needed()
             }
+            Message::PaletteSelected(kind) => {
+                self.palette.set_kind(kind, self.num_symbols);
+                if kind != PaletteKind::Gradient {
+                    self.color_picker = None;
+                }
+                self.status = format!("Palette: {kind}");
+                self.refresh_frame();
+                Task::none()
+            }
+            Message::GradientStartChanged(hex) => {
+                match self.palette.set_gradient_start_hex(hex, self.num_symbols) {
+                    Ok(()) => {
+                        self.status.clear();
+                        if self.color_picker == Some(GradientEndpoint::Start) {
+                            self.sync_picker_from_rgb(self.palette.gradient_start);
+                        }
+                        self.refresh_frame();
+                    }
+                    Err(e) => {
+                        self.status = format!("Start colour: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::GradientEndChanged(hex) => {
+                match self.palette.set_gradient_end_hex(hex, self.num_symbols) {
+                    Ok(()) => {
+                        self.status.clear();
+                        if self.color_picker == Some(GradientEndpoint::End) {
+                            self.sync_picker_from_rgb(self.palette.gradient_end);
+                        }
+                        self.refresh_frame();
+                    }
+                    Err(e) => {
+                        self.status = format!("End colour: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::ToggleColorPicker(endpoint) => {
+                if self.color_picker == Some(endpoint) {
+                    self.color_picker = None;
+                } else {
+                    let rgb = match endpoint {
+                        GradientEndpoint::Start => self.palette.gradient_start,
+                        GradientEndpoint::End => self.palette.gradient_end,
+                    };
+                    self.sync_picker_from_rgb(rgb);
+                    self.color_picker = Some(endpoint);
+                }
+                Task::none()
+            }
+            Message::CloseColorPicker => {
+                self.color_picker = None;
+                Task::none()
+            }
+            Message::PickerHueSatChanged(h, s) => {
+                self.picker_hue = h;
+                self.picker_saturation = s;
+                self.apply_picker_from_hsv();
+                Task::none()
+            }
+            Message::PickerHsvChanged(channel, value) => {
+                match channel {
+                    HsvChannel::Hue => self.picker_hue = value.rem_euclid(360.0),
+                    HsvChannel::Saturation => self.picker_saturation = value.clamp(0.0, 1.0),
+                    HsvChannel::Value => self.picker_value = value.clamp(0.0, 1.0),
+                }
+                self.apply_picker_from_hsv();
+                Task::none()
+            }
+            Message::PickerRgbChanged(channel, value) => {
+                let mut rgb = self.picker_rgb();
+                let v = value.round().clamp(0.0, 255.0) as u8;
+                match channel {
+                    RgbChannel::Red => rgb[0] = v,
+                    RgbChannel::Green => rgb[1] = v,
+                    RgbChannel::Blue => rgb[2] = v,
+                }
+                self.sync_picker_from_rgb(rgb);
+                self.apply_picker_rgb(rgb);
+                Task::none()
+            }
+            Message::PickerHexChanged(hex) => {
+                self.picker_hex = hex;
+                match palette::parse_hex_rgb(&self.picker_hex) {
+                    Ok(rgb) => {
+                        self.sync_picker_from_rgb(rgb);
+                        self.apply_picker_rgb(rgb);
+                        self.status.clear();
+                    }
+                    Err(e) => {
+                        self.status = format!("Picker colour: {e}");
+                    }
+                }
+                Task::none()
+            }
         }
+    }
+
+    fn picker_rgb(&self) -> Rgb {
+        let color = hsv_to_color(self.picker_hue, self.picker_saturation, self.picker_value);
+        [
+            (color.r * 255.0).round() as u8,
+            (color.g * 255.0).round() as u8,
+            (color.b * 255.0).round() as u8,
+        ]
+    }
+
+    fn sync_picker_from_rgb(&mut self, rgb: Rgb) {
+        let (h, s, v) = color_to_hsv(rgb_color(rgb));
+        self.picker_hue = h;
+        self.picker_saturation = s;
+        self.picker_value = v;
+        self.picker_hex = palette::rgb_to_hex(rgb);
+    }
+
+    fn apply_picker_from_hsv(&mut self) {
+        let rgb = self.picker_rgb();
+        self.picker_hex = palette::rgb_to_hex(rgb);
+        self.apply_picker_rgb(rgb);
+    }
+
+    fn apply_picker_rgb(&mut self, rgb: Rgb) {
+        let Some(endpoint) = self.color_picker else {
+            return;
+        };
+        match endpoint {
+            GradientEndpoint::Start => {
+                self.palette
+                    .set_gradient_start_rgb(rgb, self.num_symbols);
+            }
+            GradientEndpoint::End => {
+                self.palette.set_gradient_end_rgb(rgb, self.num_symbols);
+            }
+        }
+        self.status.clear();
+        self.refresh_frame();
+    }
+
+    fn color_picker_panel(&self, endpoint: GradientEndpoint) -> Element<'_, Message> {
+        let label = match endpoint {
+            GradientEndpoint::Start => "Start colour",
+            GradientEndpoint::End => "End colour",
+        };
+        let rgb = self.picker_rgb();
+
+        let panel = column![
+            row![
+                text(label).size(13),
+                Space::new().width(Length::Fill),
+                button("Close").on_press(Message::CloseColorPicker),
+            ]
+            .align_y(Alignment::Center),
+            container(
+                canvas(WheelProgram::new(
+                    self.picker_hue,
+                    self.picker_saturation,
+                    self.picker_value,
+                    Message::PickerHueSatChanged,
+                ))
+                .width(200)
+                .height(200),
+            )
+            .center_x(Length::Fill),
+            container(Space::new().height(20))
+                .width(Length::Fill)
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(Background::Color(rgb_color(rgb))),
+                    border: Border {
+                        color: Color::from_rgb(0.4, 0.4, 0.4),
+                        width: 1.0,
+                        radius: 2.0.into(),
+                    },
+                    ..container::Style::default()
+                }),
+            column![
+                text("HSV").size(13),
+                channel_slider(
+                    "H",
+                    0.0..=360.0,
+                    self.picker_hue,
+                    1.0,
+                    format!("{:.0}°", self.picker_hue),
+                    |v| Message::PickerHsvChanged(HsvChannel::Hue, v),
+                ),
+                channel_slider(
+                    "S",
+                    0.0..=1.0,
+                    self.picker_saturation,
+                    0.01,
+                    format!("{:.0}%", self.picker_saturation * 100.0),
+                    |v| Message::PickerHsvChanged(HsvChannel::Saturation, v),
+                ),
+                channel_slider(
+                    "V",
+                    0.0..=1.0,
+                    self.picker_value,
+                    0.01,
+                    format!("{:.0}%", self.picker_value * 100.0),
+                    |v| Message::PickerHsvChanged(HsvChannel::Value, v),
+                ),
+            ]
+            .spacing(4),
+            column![
+                text("RGB").size(13),
+                channel_slider(
+                    "R",
+                    0.0..=255.0,
+                    f32::from(rgb[0]),
+                    1.0,
+                    rgb[0].to_string(),
+                    |v| Message::PickerRgbChanged(RgbChannel::Red, v),
+                ),
+                channel_slider(
+                    "G",
+                    0.0..=255.0,
+                    f32::from(rgb[1]),
+                    1.0,
+                    rgb[1].to_string(),
+                    |v| Message::PickerRgbChanged(RgbChannel::Green, v),
+                ),
+                channel_slider(
+                    "B",
+                    0.0..=255.0,
+                    f32::from(rgb[2]),
+                    1.0,
+                    rgb[2].to_string(),
+                    |v| Message::PickerRgbChanged(RgbChannel::Blue, v),
+                ),
+            ]
+            .spacing(4),
+            row![
+                text("Hex:").width(36),
+                text_input("#RRGGBB", &self.picker_hex)
+                    .on_input(Message::PickerHexChanged)
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(8);
+
+        scrollable(
+            container(panel)
+                .padding(8)
+                .style(|_theme: &Theme| container::Style {
+                    background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
+                    border: Border {
+                        color: Color::from_rgb(0.35, 0.35, 0.35),
+                        width: 1.0,
+                        radius: 4.0.into(),
+                    },
+                    ..container::Style::default()
+                }),
+        )
+        .height(Length::Fixed(420.0))
+        .into()
     }
 
     fn run_frame(&mut self) {
@@ -306,7 +610,7 @@ impl App {
     }
 
     fn refresh_frame(&mut self) {
-        fill_rgba_from_map(&self.program.map, &mut self.pixels);
+        fill_rgba_from_map(&self.program.map, &mut self.pixels, &self.palette.colors);
         self.frame = Handle::from_rgba(MAP_WIDTH as u32, MAP_HEIGHT as u32, self.pixels.clone());
     }
 
@@ -350,7 +654,7 @@ impl App {
                 .into();
         }
 
-        let canvas = self.drawing_canvas();
+        let drawing = self.drawing_canvas();
 
         let can_remove = self.program.machines.len() > 1;
 
@@ -386,43 +690,110 @@ impl App {
             ]
             .spacing(8)
             .align_y(Alignment::Center),
-            Space::new().height(8),
             row![
-                button("Random").on_press(Message::Random),
-                button("Restart").on_press(Message::Restart),
-                button("Add machine").on_press(Message::AddMachine),
-                button("Fullscreen").on_press(Message::ToggleFullscreen),
-            ]
-            .spacing(10),
-            Space::new().height(12),
-            scrollable(
-                text(
-                    "Turing Drawings uses randomly generated Turing machines \
-                     to produce drawings on a canvas, as a form of generative art. \
-                     Machines share one finite 2D grid; each cell holds a symbol \
-                     (a color). They must use the same number of states and symbols, \
-                     but each has its own rules and start position. Press Random to \
-                     regenerate every machine, Add machine to add another (this \
-                     resets the drawing), or Restart to clear the grid. Each machine \
-                     has an encoding below; original website #hashes load with start (0,0). \
-                     Double-click the drawing to hide controls; F11 or Fullscreen for \
-                     OS fullscreen.",
+                text("Palette:").width(110),
+                pick_list(
+                    PaletteKind::ALL,
+                    Some(self.palette.kind),
+                    Message::PaletteSelected,
                 )
-                .size(14),
-            )
-            .height(140),
-            Space::new().height(8),
-            text(format!(
-                "Machines: {}   Iterations: {}",
-                self.program.machines.len(),
-                self.program.itr_count
-            ))
-            .size(13),
-            text(&self.status).size(13),
+                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         ]
         .spacing(6)
         .width(380)
         .padding(8);
+
+        let mut swatches = row![].spacing(4);
+        for &c in &self.palette.colors {
+            swatches = swatches.push(color_swatch(c, 28.0, 18.0));
+        }
+        let mut controls = controls.push(swatches);
+
+        if self.palette.kind == PaletteKind::Gradient {
+            controls = controls
+                .push(
+                    row![
+                        text("Start:").width(110),
+                        clickable_color_swatch(
+                            self.palette.gradient_start,
+                            28.0,
+                            22.0,
+                            Message::ToggleColorPicker(GradientEndpoint::Start),
+                        ),
+                        text_input("#RRGGBB", &self.palette.gradient_start_hex)
+                            .on_input(Message::GradientStartChanged)
+                            .width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .push(
+                    row![
+                        text("End:").width(110),
+                        clickable_color_swatch(
+                            self.palette.gradient_end,
+                            28.0,
+                            22.0,
+                            Message::ToggleColorPicker(GradientEndpoint::End),
+                        ),
+                        text_input("#RRGGBB", &self.palette.gradient_end_hex)
+                            .on_input(Message::GradientEndChanged)
+                            .width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+
+            if let Some(endpoint) = self.color_picker {
+                controls = controls.push(self.color_picker_panel(endpoint));
+            }
+        }
+
+        let controls = controls
+            .push(Space::new().height(8))
+            .push(
+                row![
+                    button("Random").on_press(Message::Random),
+                    button("Restart").on_press(Message::Restart),
+                    button("Add machine").on_press(Message::AddMachine),
+                    button("Fullscreen").on_press(Message::ToggleFullscreen),
+                ]
+                .spacing(10),
+            )
+            .push(Space::new().height(12))
+            .push(
+                scrollable(
+                    text(
+                        "Turing Drawings uses randomly generated Turing machines \
+                         to produce drawings on a canvas, as a form of generative art. \
+                         Machines share one finite 2D grid; each cell holds a symbol \
+                         (a color). They must use the same number of states and symbols, \
+                         but each has its own rules and start position. Press Random to \
+                         regenerate every machine, Add machine to add another (this \
+                         resets the drawing), or Restart to clear the grid. Each machine \
+                         has an encoding below; original website #hashes load with start (0,0). \
+                         Double-click the drawing to hide controls; F11 or Fullscreen for \
+                         OS fullscreen. Choose a palette to recolor the drawing; Gradient \
+                         lets you pick start and end colours (click a swatch for the \
+                         full colour picker: wheel, HSV, RGB, hex).",
+                    )
+                    .size(14),
+                )
+                .height(140),
+            )
+            .push(Space::new().height(8))
+            .push(
+                text(format!(
+                    "Machines: {}   Iterations: {}",
+                    self.program.machines.len(),
+                    self.program.itr_count
+                ))
+                .size(13),
+            )
+            .push(text(&self.status).size(13));
 
         let mut machine_rows = column![text("Shareable encodings:").size(14)].spacing(8);
 
@@ -454,7 +825,7 @@ impl App {
             .height(Length::Fixed(160.0))
             .width(Length::Fill);
 
-        let body = row![canvas, controls]
+        let body = row![drawing, controls]
             .spacing(16)
             .align_y(Alignment::Start)
             .width(Length::Fill)
@@ -474,20 +845,67 @@ impl App {
     }
 }
 
-fn rgba_from_map(map: &[i32]) -> Vec<u8> {
+fn rgba_from_map(map: &[i32], colors: &[Rgb; MAX_SYMBOLS]) -> Vec<u8> {
     let mut pixels = vec![0u8; map.len() * 4];
-    fill_rgba_from_map(map, &mut pixels);
+    fill_rgba_from_map(map, &mut pixels, colors);
     pixels
 }
 
-fn fill_rgba_from_map(map: &[i32], pixels: &mut [u8]) {
+fn fill_rgba_from_map(map: &[i32], pixels: &mut [u8], colors: &[Rgb; MAX_SYMBOLS]) {
     debug_assert_eq!(pixels.len(), map.len() * 4);
     for (i, &sy) in map.iter().enumerate() {
-        let c = COLOR_MAP[sy as usize];
+        let c = colors[sy as usize];
         let o = i * 4;
         pixels[o] = c[0];
         pixels[o + 1] = c[1];
         pixels[o + 2] = c[2];
         pixels[o + 3] = 255;
     }
+}
+
+fn rgb_color(rgb: Rgb) -> Color {
+    Color::from_rgb8(rgb[0], rgb[1], rgb[2])
+}
+
+fn color_swatch(rgb: Rgb, width: f32, height: f32) -> Element<'static, Message> {
+    container(Space::new().width(width).height(height))
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(Background::Color(rgb_color(rgb))),
+            border: Border {
+                color: Color::from_rgb(0.4, 0.4, 0.4),
+                width: 1.0,
+                radius: 2.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn clickable_color_swatch(
+    rgb: Rgb,
+    width: f32,
+    height: f32,
+    on_press: Message,
+) -> Element<'static, Message> {
+    mouse_area(color_swatch(rgb, width, height))
+        .on_press(on_press)
+        .into()
+}
+
+fn channel_slider<'a>(
+    label: &'a str,
+    range: std::ops::RangeInclusive<f32>,
+    value: f32,
+    step: f32,
+    value_label: String,
+    on_change: impl Fn(f32) -> Message + 'a,
+) -> Element<'a, Message> {
+    row![
+        text(label).width(18),
+        slider(range, value, on_change).step(step),
+        text(value_label).width(48).align_x(Alignment::End),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
 }
