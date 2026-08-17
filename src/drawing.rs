@@ -79,8 +79,7 @@ where
     }
 }
 
-impl<'a, Message, Theme, Renderer> From<SimulationFrame>
-    for Element<'a, Message, Theme, Renderer>
+impl<'a, Message, Theme, Renderer> From<SimulationFrame> for Element<'a, Message, Theme, Renderer>
 where
     Renderer: image_core::Renderer<Handle = Handle> + 'a,
 {
