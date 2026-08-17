@@ -1,3 +1,4 @@
+mod chrome;
 mod color_picker;
 mod drawing;
 mod machine;
@@ -10,12 +11,11 @@ use std::time::{Duration, Instant};
 use iced::keyboard::key;
 use iced::widget::image::Handle;
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
-    slider, stack, text, text_input, Space,
+    center, column, container, mouse_area, opaque, pick_list, row, scrollable, slider, stack, Space,
 };
 use iced::{
-    clipboard, event, keyboard, time, window, Alignment, Background, Border, Color,
-    Element, Event, Length, Size, Subscription, Task, Theme,
+    clipboard, event, keyboard, time, window, Alignment, Element, Event, Length, Size,
+    Subscription, Task, Theme,
 };
 
 use color_picker::{ColorPicker, ControlsMessage, GradientEndpoint};
@@ -136,8 +136,8 @@ fn main() -> iced::Result {
         .theme(theme)
         .subscription(App::subscription)
         .window(window::Settings {
-            size: Size::new(960.0, 720.0),
-            min_size: Some(Size::new(640.0, 480.0)),
+            size: Size::new(1100.0, 720.0),
+            min_size: Some(Size::new(900.0, 560.0)),
             ..Default::default()
         })
         .run()
@@ -189,7 +189,7 @@ struct App {
     drawing_only: bool,
     palette: Palette,
     color_picker: ColorPicker,
-    /// Machine whose details overlay is open.
+    /// Machine whose inspector section is open.
     selected_machine: Option<usize>,
     /// Whether the preset browser overlay is open.
     preset_browser_open: bool,
@@ -199,6 +199,16 @@ struct App {
     preset_list: Vec<PresetInfo>,
     /// Order of the preset browser list.
     preset_sort: PresetSort,
+    canvas_open: bool,
+    palette_open: bool,
+    simulation_open: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorGroup {
+    Canvas,
+    Palette,
+    Simulation,
 }
 
 #[derive(Debug, Clone)]
@@ -240,6 +250,7 @@ enum Message {
     LoadPreset(String),
     DeletePreset(String),
     PresetSortChanged(PresetSort),
+    ToggleInspectorGroup(InspectorGroup),
 }
 
 impl App {
@@ -275,6 +286,9 @@ impl App {
                 preset_name: String::new(),
                 preset_list: Vec::new(),
                 preset_sort: PresetSort::DateSaved,
+                canvas_open: true,
+                palette_open: true,
+                simulation_open: true,
             },
             Task::none(),
         )
@@ -669,6 +683,14 @@ impl App {
                 preset::sort_preset_infos(&mut self.preset_list, sort);
                 Task::none()
             }
+            Message::ToggleInspectorGroup(group) => {
+                match group {
+                    InspectorGroup::Canvas => self.canvas_open = !self.canvas_open,
+                    InspectorGroup::Palette => self.palette_open = !self.palette_open,
+                    InspectorGroup::Simulation => self.simulation_open = !self.simulation_open,
+                }
+                Task::none()
+            }
         }
     }
 
@@ -760,29 +782,15 @@ impl App {
     }
 
     fn drawing_canvas(&self) -> Element<'_, Message> {
-        let framed = container(simulation_frame(self.frame.clone()))
-        .padding(0)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(Color::BLACK)),
-            border: Border {
-                color: Color::WHITE,
-                width: 2.0,
-                radius: 0.0.into(),
-            },
-            ..container::Style::default()
-        });
-
-        container(mouse_area(framed).on_double_click(Message::ToggleDrawingOnly))
-            .center(Length::Fill)
-            .into()
-    }
-
-    fn root_style() -> impl Fn(&Theme) -> container::Style {
-        |_theme: &Theme| container::Style {
-            background: Some(Background::Color(Color::BLACK)),
-            text_color: Some(Color::WHITE),
-            ..container::Style::default()
-        }
+        container(
+            mouse_area(simulation_frame(self.frame.clone()))
+                .on_double_click(Message::ToggleDrawingOnly),
+        )
+        .center(Length::Fill)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(chrome::viewer)
+        .into()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -790,221 +798,31 @@ impl App {
             return container(self.drawing_canvas())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .style(Self::root_style())
+                .style(chrome::window)
                 .into();
         }
 
-        let drawing = self.drawing_canvas();
-
-        let can_remove = self.program.machines.len() > 1;
-
-        let controls = column![
-            text("Turing Drawings").size(28),
-            Space::new().height(8),
-            row![
-                text("Num states:").width(110),
-                button("−").on_press(Message::DecStates),
-                text(self.num_states.to_string())
-                    .width(36)
-                    .align_x(Alignment::Center),
-                button("+").on_press(Message::IncStates),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Num symbols:").width(110),
-                button("−").on_press(Message::DecSymbols),
-                text(self.num_symbols.to_string())
-                    .width(36)
-                    .align_x(Alignment::Center),
-                button("+").on_press(Message::IncSymbols),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Resolution:").width(110),
-                pick_list(
-                    RESOLUTION_PRESETS,
-                    RESOLUTION_PRESETS.iter().copied().find(|preset| {
-                        preset.width == self.program.width && preset.height == self.program.height
-                    }),
-                    |preset: ResolutionPreset| {
-                        Message::ResolutionPreset(preset.width, preset.height)
-                    },
-                )
-                .placeholder("Custom")
-                .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                Space::new().width(110),
-                text_input("W", &self.map_width_text)
-                    .on_input(Message::MapWidthText)
-                    .width(Length::Fill),
-                text("×").width(16),
-                text_input("H", &self.map_height_text)
-                    .on_input(Message::MapHeightText)
-                    .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Speed:").width(110),
-                slider(0.0..=1.0, self.speed, Message::SpeedChanged).step(0.01_f32),
-                text(format!("{:.2}", self.speed))
-                    .width(40)
-                    .align_x(Alignment::Center),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Refresh rate:").width(110),
-                pick_list(
-                    REFRESH_PRESETS,
-                    REFRESH_PRESETS
-                        .iter()
-                        .copied()
-                        .find(|preset| preset.0 == self.refresh_hz),
-                    |preset: RefreshPreset| Message::RefreshPreset(preset.0),
-                )
-                .placeholder("Custom")
-                .width(100),
-                text_input("Hz", &self.refresh_hz_text)
-                    .on_input(Message::RefreshHzText)
-                    .width(Length::Fill),
-                text("Hz").width(24),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            row![
-                text("Max itrs/frame:").width(110),
-                slider(
-                    MIN_MAX_ITRS as f32..=MAX_MAX_ITRS as f32,
-                    self.max_itrs as f32,
-                    Message::MaxItrsChanged,
-                )
-                .step(1_000.0_f32),
-                text(self.max_itrs.to_string())
-                    .width(72)
-                    .align_x(Alignment::Center),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-            color_picker::palette_controls(&self.palette, &self.color_picker).map(
-                |msg| match msg {
-                    ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
-                    ControlsMessage::GradientStartChanged(hex) =>
-                        Message::GradientStartChanged(hex),
-                    ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
-                    ControlsMessage::Picker(m) => Message::ColorPicker(m),
-                }
-            ),
-        ]
-        .spacing(6)
-        .width(380)
-        .padding(8);
-
-        let controls = controls
-            .push(Space::new().height(8))
-            .push(
-                row![
-                    button("Random").on_press(Message::Random),
-                    button("Restart").on_press(Message::Restart),
-                    button("Add machine").on_press(Message::AddMachine),
-                    button("Presets").on_press(Message::OpenPresetBrowser),
-                    button("Fullscreen").on_press(Message::ToggleFullscreen),
-                ]
-                .spacing(10),
-            )
-            .push(Space::new().height(12))
-            .push(
-                scrollable(
-                    text(
-                        "Turing Drawings uses randomly generated Turing machines \
-                         to produce drawings on a canvas, as a form of generative art. \
-                         Machines share one finite 2D grid; each cell holds a symbol \
-                         (a color). They must use the same number of states and symbols, \
-                         but each has its own rules and start position. Press Random to \
-                         regenerate every machine, or Randomise on a machine to regenerate \
-                         only that one. Add machine to add another (this resets the \
-                         drawing), or Restart to clear the grid. Use Presets to store or \
-                         load the starting setup of all machines. Resolution sets the \
-                         drawing grid (default 512 × 512); choose a preset or type a \
-                         custom width and height (64–4096). Changing resolution clears \
-                         the drawing. Each machine has its own \
-                         Speed slider (0 is the default rate; frequency is 10^(speed/10), \
-                         so +10 is ten times more often and −10 ten times less). \
-                         Refresh rate sets how often the simulation ticks (default 60 Hz); \
-                         choose a preset or type a custom Hz. Max itrs/frame is the round \
-                         cap each tick at Speed 1 (default 350000); Speed is a fraction of \
-                         that cap, and work also yields when the frame's time budget is \
-                         spent. Click \
-                         a machine for its details \
-                         and shareable encoding; original website #hashes load \
-                         with start (0,0). \
-                         Double-click the drawing to hide controls; F11 or Fullscreen for \
-                         OS fullscreen. Choose a palette to recolor the drawing; Gradient \
-                         lets you pick start and end colours (click a swatch for the \
-                         full colour picker: wheel, HSV, RGB, hex).",
-                    )
-                    .size(14),
-                )
-                .height(140),
-            )
-            .push(Space::new().height(8))
-            .push(
-                text(format!(
-                    "Machines: {}   Iterations: {}",
-                    self.program.machines.len(),
-                    self.program.itr_count
-                ))
-                .size(13),
-            )
-            .push(text(&self.status).size(13));
-
-        let mut machine_rows = column![text("Machines:").size(14)].spacing(6);
-
-        for i in 0..self.program.machines.len() {
-            let selected = self.selected_machine == Some(i);
-            let speed = self.program.machines[i].speed;
-            machine_rows = machine_rows.push(
-                row![
-                    mouse_area(
-                        container(text(format!("Machine {}", i + 1)).size(14))
-                            .padding([6, 10])
-                            .width(120)
-                            .style(machine_name_style(selected)),
-                    )
-                    .on_press(Message::SelectMachine(i)),
-                    machine_speed_slider(i, speed),
-                    button("Randomise").on_press(Message::RandomizeMachine(i)),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
-        }
-
-        let machine_list = scrollable(machine_rows)
-            .height(Length::Fixed(120.0))
-            .width(Length::Fill);
-
-        let body = row![drawing, controls]
-            .spacing(16)
-            .align_y(Alignment::Start)
-            .width(Length::Fill)
-            .height(Length::Fill);
-
         let content = container(
-            column![body, Space::new().height(12), machine_list]
-                .spacing(4)
-                .padding(16)
-                .width(Length::Fill)
+            column![
+                self.toolbar(),
+                chrome::hrule(),
+                row![
+                    self.machine_panel(),
+                    chrome::vrule(),
+                    self.drawing_canvas(),
+                    chrome::vrule(),
+                    self.inspector(),
+                ]
                 .height(Length::Fill),
+                chrome::hrule(),
+                self.status_bar(),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(Self::root_style());
+        .style(chrome::window);
 
         if self.preset_browser_open {
             return stack([content.into(), self.preset_browser()])
@@ -1013,22 +831,338 @@ impl App {
                 .into();
         }
 
+        content.into()
+    }
+
+    fn toolbar(&self) -> Element<'_, Message> {
+        container(
+            row![
+                chrome::compact_button("Random").on_press(Message::Random),
+                chrome::compact_button("Restart").on_press(Message::Restart),
+                chrome::compact_button("Add machine").on_press(Message::AddMachine),
+                chrome::compact_button("Presets").on_press(Message::OpenPresetBrowser),
+                Space::new().width(Length::Fill),
+                chrome::compact_button("Fullscreen").on_press(Message::ToggleFullscreen),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([6, 10])
+        .width(Length::Fill)
+        .style(chrome::toolbar)
+        .into()
+    }
+
+    fn machine_panel(&self) -> Element<'_, Message> {
+        let mut list = column![].spacing(6);
+        for i in 0..self.program.machines.len() {
+            let selected = self.selected_machine == Some(i);
+            let speed = self.program.machines[i].speed;
+            list = list.push(
+                container(
+                    column![
+                        row![
+                            mouse_area(chrome::value(format!("Machine {}", i + 1)))
+                                .on_press(Message::SelectMachine(i)),
+                            Space::new().width(Length::Fill),
+                            chrome::compact_button("Randomise")
+                                .on_press(Message::RandomizeMachine(i)),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                        machine_speed_slider(i, speed),
+                    ]
+                    .spacing(4),
+                )
+                .padding(8)
+                .width(Length::Fill)
+                .style(chrome::machine_card(selected)),
+            );
+        }
+
+        container(
+            column![
+                container(chrome::dim("MACHINES"))
+                    .padding(iced::Padding {
+                        top: 8.0,
+                        right: 10.0,
+                        bottom: 4.0,
+                        left: 10.0,
+                    })
+                    .width(Length::Fill),
+                chrome::hrule(),
+                scrollable(list.padding(8))
+                    .style(chrome::scrollable_style)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            ]
+            .height(Length::Fill),
+        )
+        .width(chrome::LEFT_PANEL)
+        .height(Length::Fill)
+        .style(chrome::panel)
+        .into()
+    }
+
+    fn inspector(&self) -> Element<'_, Message> {
+        let mut groups = column![];
+
         if let Some(index) = self.selected_machine {
             if index < self.program.machines.len() {
-                return stack([content.into(), self.machine_details(index, can_remove)])
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .into();
+                groups = groups.push(self.machine_inspector(index));
             }
         }
 
-        content.into()
+        groups = groups
+            .push(collapsible(
+                "CANVAS",
+                self.canvas_open,
+                Message::ToggleInspectorGroup(InspectorGroup::Canvas),
+                self.canvas_group(),
+            ))
+            .push(collapsible(
+                "PALETTE",
+                self.palette_open,
+                Message::ToggleInspectorGroup(InspectorGroup::Palette),
+                self.palette_group(),
+            ))
+            .push(collapsible(
+                "SIMULATION",
+                self.simulation_open,
+                Message::ToggleInspectorGroup(InspectorGroup::Simulation),
+                self.simulation_group(),
+            ));
+
+        container(
+            column![
+                container(chrome::dim("INSPECTOR"))
+                    .padding(iced::Padding {
+                        top: 8.0,
+                        right: 10.0,
+                        bottom: 4.0,
+                        left: 10.0,
+                    })
+                    .width(Length::Fill),
+                chrome::hrule(),
+                scrollable(groups)
+                    .style(chrome::scrollable_style)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            ]
+            .height(Length::Fill),
+        )
+        .width(chrome::RIGHT_PANEL)
+        .height(Length::Fill)
+        .style(chrome::panel)
+        .into()
+    }
+
+    fn canvas_group(&self) -> Element<'_, Message> {
+        column![
+            inspector_row(
+                "States",
+                stepper(self.num_states, Message::DecStates, Message::IncStates),
+            ),
+            inspector_row(
+                "Symbols",
+                stepper(self.num_symbols, Message::DecSymbols, Message::IncSymbols,),
+            ),
+            inspector_row(
+                "Size",
+                chrome::decorate_pick_list(
+                    pick_list(
+                        RESOLUTION_PRESETS,
+                        RESOLUTION_PRESETS.iter().copied().find(|preset| {
+                            preset.width == self.program.width
+                                && preset.height == self.program.height
+                        }),
+                        |preset: ResolutionPreset| {
+                            Message::ResolutionPreset(preset.width, preset.height)
+                        },
+                    )
+                    .placeholder("Custom")
+                    .width(Length::Fill),
+                ),
+            ),
+            inspector_row(
+                "",
+                row![
+                    chrome::field("W", &self.map_width_text)
+                        .on_input(Message::MapWidthText)
+                        .width(Length::Fill),
+                    chrome::dim("×").width(14).align_x(Alignment::Center),
+                    chrome::field("H", &self.map_height_text)
+                        .on_input(Message::MapHeightText)
+                        .width(Length::Fill),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    fn palette_group(&self) -> Element<'_, Message> {
+        color_picker::palette_controls(&self.palette, &self.color_picker).map(|msg| match msg {
+            ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
+            ControlsMessage::GradientStartChanged(hex) => Message::GradientStartChanged(hex),
+            ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
+            ControlsMessage::Picker(m) => Message::ColorPicker(m),
+        })
+    }
+
+    fn simulation_group(&self) -> Element<'_, Message> {
+        column![
+            inspector_row(
+                "Speed",
+                row![
+                    slider(0.0..=1.0, self.speed, Message::SpeedChanged)
+                        .step(0.01_f32)
+                        .style(chrome::slider_style),
+                    chrome::dim(format!("{:.2}", self.speed))
+                        .width(36)
+                        .align_x(Alignment::End),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            inspector_row(
+                "Refresh",
+                chrome::decorate_pick_list(
+                    pick_list(
+                        REFRESH_PRESETS,
+                        REFRESH_PRESETS
+                            .iter()
+                            .copied()
+                            .find(|preset| preset.0 == self.refresh_hz),
+                        |preset: RefreshPreset| Message::RefreshPreset(preset.0),
+                    )
+                    .placeholder("Custom")
+                    .width(Length::Fill),
+                ),
+            ),
+            inspector_row(
+                "",
+                row![
+                    chrome::field("Hz", &self.refresh_hz_text)
+                        .on_input(Message::RefreshHzText)
+                        .width(Length::Fill),
+                    chrome::dim("Hz").width(22),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            inspector_row(
+                "Max itrs",
+                row![
+                    slider(
+                        MIN_MAX_ITRS as f32..=MAX_MAX_ITRS as f32,
+                        self.max_itrs as f32,
+                        Message::MaxItrsChanged,
+                    )
+                    .step(1_000.0_f32)
+                    .style(chrome::slider_style),
+                    chrome::dim(self.max_itrs.to_string())
+                        .width(64)
+                        .align_x(Alignment::End),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    fn machine_inspector(&self, index: usize) -> Element<'_, Message> {
+        let machine = &self.program.machines[index];
+        let share = self
+            .share_texts
+            .get(index)
+            .map(String::as_str)
+            .unwrap_or("");
+        let can_remove = self.program.machines.len() > 1;
+
+        let mut remove = chrome::danger_button("Remove");
+        if can_remove {
+            remove = remove.on_press(Message::RemoveMachine(index));
+        }
+
+        let header = row![
+            chrome::dim(format!("MACHINE {}", index + 1)),
+            Space::new().width(Length::Fill),
+            chrome::compact_button("Close").on_press(Message::CloseMachineDetails),
+        ]
+        .padding([6, 8])
+        .align_y(Alignment::Center);
+
+        column![
+            header,
+            container(
+                column![
+                    chrome::dim(format!(
+                        "State {}  ·  ({}, {})  ·  start ({}, {})",
+                        machine.state,
+                        machine.x_pos,
+                        machine.y_pos,
+                        machine.start_x,
+                        machine.start_y
+                    )),
+                    chrome::label("Encoding"),
+                    chrome::field("numStates,numSymbols,startX,startY,...", share)
+                        .on_input(move |s| Message::ShareChanged(index, s))
+                        .width(Length::Fill),
+                    row![
+                        chrome::compact_button("Copy").on_press(Message::CopyShare(index)),
+                        chrome::compact_button("Load").on_press(Message::LoadShare(index)),
+                        remove,
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(6),
+            )
+            .padding(iced::Padding {
+                top: 2.0,
+                right: 8.0,
+                bottom: 10.0,
+                left: 8.0,
+            }),
+            chrome::hrule(),
+        ]
+        .into()
+    }
+
+    fn status_bar(&self) -> Element<'_, Message> {
+        let n = self.program.machines.len();
+        let stats = format!(
+            "{n} machine{}  ·  {} itrs  ·  {}×{}  ·  {} Hz",
+            if n == 1 { "" } else { "s" },
+            self.program.itr_count,
+            self.program.width,
+            self.program.height,
+            self.refresh_hz,
+        );
+        container(
+            row![
+                chrome::dim(stats),
+                Space::new().width(Length::Fill),
+                chrome::dim(self.status.as_str()),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center),
+        )
+        .padding([4, 10])
+        .width(Length::Fill)
+        .style(chrome::status_bar)
+        .into()
     }
 
     fn preset_browser(&self) -> Element<'_, Message> {
         let mut list = column![].spacing(6);
         if self.preset_list.is_empty() {
-            list = list.push(text("No saved presets yet.").size(13));
+            list = list.push(chrome::dim("No saved presets yet."));
         } else {
             for info in &self.preset_list {
                 let name_load = info.name.clone();
@@ -1036,20 +1170,20 @@ impl App {
                 list = list.push(
                     row![
                         column![
-                            text(&info.name).size(14),
-                            text(format!(
+                            chrome::value(&info.name),
+                            chrome::dim(format!(
                                 "{} machine(s), {} states × {} symbols · {}",
                                 info.num_machines,
                                 info.num_states,
                                 info.num_symbols,
                                 preset::format_saved_at(info.saved_at)
-                            ))
-                            .size(12),
+                            )),
                         ]
                         .spacing(2)
                         .width(Length::Fill),
-                        button("Load").on_press(Message::LoadPreset(name_load)),
-                        button("Delete").on_press(Message::DeletePreset(name_delete)),
+                        chrome::compact_button("Load").on_press(Message::LoadPreset(name_load)),
+                        chrome::danger_button("Delete")
+                            .on_press(Message::DeletePreset(name_delete)),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -1060,155 +1194,116 @@ impl App {
         let panel = container(
             column![
                 row![
-                    text("Presets").size(20),
+                    chrome::value("Presets").size(16),
                     Space::new().width(Length::Fill),
-                    button("Close").on_press(Message::ClosePresetBrowser),
+                    chrome::compact_button("Close").on_press(Message::ClosePresetBrowser),
                 ]
                 .align_y(Alignment::Center),
-                text(
-                    "Store the starting setup of all machines (rules, starts, speeds, \
-                     canvas size). Loading replaces the current machines and clears the drawing."
-                )
-                .size(13),
+                chrome::dim("Store rules, starts, speeds, and canvas size. Load replaces the current machines."),
                 row![
-                    text_input("Preset name", &self.preset_name)
+                    chrome::field("Preset name", &self.preset_name)
                         .on_input(Message::PresetNameChanged)
                         .width(Length::Fill),
-                    button("Store").on_press(Message::StorePreset),
+                    chrome::compact_button("Store").on_press(Message::StorePreset),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
                 row![
-                    text("Saved presets:").size(14).width(Length::Fill),
-                    text("Sort:").size(13),
-                    pick_list(
-                        PresetSort::ALL,
-                        Some(self.preset_sort),
-                        Message::PresetSortChanged,
-                    )
-                    .width(140),
+                    chrome::label("Saved").width(Length::Fill),
+                    chrome::dim("Sort"),
+                    chrome::decorate_pick_list(
+                        pick_list(
+                            PresetSort::ALL,
+                            Some(self.preset_sort),
+                            Message::PresetSortChanged,
+                        )
+                        .width(140),
+                    ),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
                 scrollable(list)
+                    .style(chrome::scrollable_style)
                     .height(Length::Fixed(280.0))
                     .width(Length::Fill),
             ]
             .spacing(10),
         )
         .padding(16)
-        .width(560)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
-            border: Border {
-                color: Color::from_rgb(0.45, 0.45, 0.45),
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            text_color: Some(Color::WHITE),
-            ..container::Style::default()
-        });
+        .width(520)
+        .style(chrome::overlay_panel);
 
         opaque(
-            mouse_area(
-                center(opaque(panel)).style(|_theme: &Theme| container::Style {
-                    background: Some(Background::Color(Color {
-                        a: 0.65,
-                        ..Color::BLACK
-                    })),
-                    ..container::Style::default()
-                }),
-            )
-            .on_press(Message::ClosePresetBrowser),
+            mouse_area(center(opaque(panel)).style(chrome::scrim))
+                .on_press(Message::ClosePresetBrowser),
         )
     }
+}
 
-    fn machine_details(&self, index: usize, can_remove: bool) -> Element<'_, Message> {
-        let machine = &self.program.machines[index];
-        let share = self
-            .share_texts
-            .get(index)
-            .map(String::as_str)
-            .unwrap_or("");
+fn collapsible<'a>(
+    title: &'a str,
+    open: bool,
+    toggle: Message,
+    body: Element<'a, Message>,
+) -> Element<'a, Message> {
+    let chevron = if open { "▾" } else { "▸" };
+    let header = chrome::header_button(
+        row![chrome::dim(chevron), chrome::dim(title)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+    )
+    .on_press(toggle);
 
-        let mut remove = button("Remove");
-        if can_remove {
-            remove = remove.on_press(Message::RemoveMachine(index));
-        }
-
-        let panel = container(
-            column![
-                row![
-                    text(format!("Machine {} details", index + 1)).size(20),
-                    Space::new().width(Length::Fill),
-                    button("Close").on_press(Message::CloseMachineDetails),
-                ]
-                .align_y(Alignment::Center),
-                text(format!(
-                    "State: {}    Position: ({}, {})    Start: ({}, {})",
-                    machine.state, machine.x_pos, machine.y_pos, machine.start_x, machine.start_y
-                ))
-                .size(13),
-                row![
-                    text("Speed:").width(60),
-                    machine_speed_slider(index, machine.speed),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-                text("Shareable encoding:").size(14),
-                text_input("numStates,numSymbols,startX,startY,...", share)
-                    .on_input(move |s| Message::ShareChanged(index, s))
-                    .width(Length::Fill),
-                row![
-                    button("Copy").on_press(Message::CopyShare(index)),
-                    button("Load").on_press(Message::LoadShare(index)),
-                    button("Randomise").on_press(Message::RandomizeMachine(index)),
-                    remove,
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            ]
-            .spacing(10),
-        )
-        .padding(16)
-        .width(560)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
-            border: Border {
-                color: Color::from_rgb(0.45, 0.45, 0.45),
-                width: 1.0,
-                radius: 6.0.into(),
-            },
-            text_color: Some(Color::WHITE),
-            ..container::Style::default()
-        });
-
-        opaque(
-            mouse_area(
-                center(opaque(panel)).style(|_theme: &Theme| container::Style {
-                    background: Some(Background::Color(Color {
-                        a: 0.65,
-                        ..Color::BLACK
-                    })),
-                    ..container::Style::default()
-                }),
-            )
-            .on_press(Message::CloseMachineDetails),
-        )
+    let mut col = column![header];
+    if open {
+        col = col.push(container(body).padding(iced::Padding {
+            top: 2.0,
+            right: 8.0,
+            bottom: 10.0,
+            left: 8.0,
+        }));
     }
+    col.push(chrome::hrule()).into()
+}
+
+fn inspector_row<'a>(
+    label: &'a str,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    row![
+        chrome::label(label).width(chrome::LABEL_WIDTH),
+        content.into(),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+fn stepper(value: usize, dec: Message, inc: Message) -> Element<'static, Message> {
+    row![
+        chrome::compact_button("−").on_press(dec),
+        chrome::value(value.to_string())
+            .width(28)
+            .align_x(Alignment::Center),
+        chrome::compact_button("+").on_press(inc),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center)
+    .into()
 }
 
 fn machine_speed_slider(index: usize, speed: f32) -> Element<'static, Message> {
     row![
         slider(MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED, speed, move |v| {
             Message::MachineSpeedChanged(index, v)
-        },)
-        .step(0.1_f32),
-        text(machine_speed_label(speed))
-            .width(88)
-            .align_x(Alignment::Center),
+        })
+        .step(0.1_f32)
+        .style(chrome::slider_style),
+        chrome::dim(machine_speed_label(speed))
+            .width(72)
+            .align_x(Alignment::End),
     ]
-    .spacing(8)
+    .spacing(6)
     .align_y(Alignment::Center)
     .into()
 }
@@ -1219,26 +1314,6 @@ fn machine_speed_label(speed: f32) -> String {
         "0.0  ×1.00".into()
     } else {
         format!("{speed:+.1}  ×{rate:.2}")
-    }
-}
-
-fn machine_name_style(selected: bool) -> impl Fn(&Theme) -> container::Style {
-    move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(if selected {
-            Color::from_rgb(0.22, 0.22, 0.28)
-        } else {
-            Color::from_rgb(0.10, 0.10, 0.10)
-        })),
-        border: Border {
-            color: if selected {
-                Color::from_rgb(0.55, 0.55, 0.65)
-            } else {
-                Color::from_rgb(0.28, 0.28, 0.28)
-            },
-            width: 1.0,
-            radius: 4.0.into(),
-        },
-        ..container::Style::default()
     }
 }
 

@@ -1,12 +1,10 @@
 //! Palette sidebar controls and the gradient colour-picker panel.
 
-use iced::widget::{
-    button, canvas, column, container, mouse_area, pick_list, row, scrollable, slider, text,
-    text_input, Space,
-};
-use iced::{Alignment, Background, Border, Color, Element, Length, Theme};
+use iced::widget::{canvas, column, container, mouse_area, pick_list, row, slider, Space};
+use iced::{Alignment, Background, Color, Element, Length, Theme};
 use iced_color_wheel::{color_to_hsv, hsv_to_color, WheelProgram};
 
+use crate::chrome;
 use crate::palette::{parse_hex_rgb, rgb_to_hex, Palette, PaletteKind, Rgb};
 
 /// Which gradient colour is being edited in the colour wheel.
@@ -38,6 +36,7 @@ pub enum Message {
     HueSatChanged(f32, f32),
     HsvChanged(HsvChannel, f32),
     RgbChanged(RgbChannel, f32),
+    #[allow(dead_code)]
     HexChanged(String),
 }
 
@@ -192,9 +191,9 @@ impl ColorPicker {
 
         let panel = column![
             row![
-                text(label).size(13),
+                chrome::label(label),
                 Space::new().width(Length::Fill),
-                button("Close").on_press(Message::Close),
+                chrome::compact_button("Close").on_press(Message::Close),
             ]
             .align_y(Alignment::Center),
             container(
@@ -204,23 +203,19 @@ impl ColorPicker {
                     self.value,
                     Message::HueSatChanged,
                 ))
-                .width(200)
-                .height(200),
+                .width(168)
+                .height(168),
             )
             .center_x(Length::Fill),
-            container(Space::new().height(20))
+            container(Space::new().height(16))
                 .width(Length::Fill)
                 .style(move |_theme: &Theme| container::Style {
                     background: Some(Background::Color(rgb_color(rgb))),
-                    border: Border {
-                        color: Color::from_rgb(0.4, 0.4, 0.4),
-                        width: 1.0,
-                        radius: 2.0.into(),
-                    },
+                    border: chrome::swatch_border(_theme),
                     ..container::Style::default()
                 }),
             column![
-                text("HSV").size(13),
+                chrome::dim("HSV"),
                 channel_slider(
                     "H",
                     0.0..=360.0,
@@ -248,7 +243,7 @@ impl ColorPicker {
             ]
             .spacing(4),
             column![
-                text("RGB").size(13),
+                chrome::dim("RGB"),
                 channel_slider(
                     "R",
                     0.0..=255.0,
@@ -275,32 +270,13 @@ impl ColorPicker {
                 ),
             ]
             .spacing(4),
-            row![
-                text("Hex:").width(36),
-                text_input("#RRGGBB", &self.hex)
-                    .on_input(Message::HexChanged)
-                    .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
         ]
-        .spacing(8);
+        .spacing(6);
 
-        scrollable(
-            container(panel)
-                .padding(8)
-                .style(|_theme: &Theme| container::Style {
-                    background: Some(Background::Color(Color::from_rgb(0.12, 0.12, 0.12))),
-                    border: Border {
-                        color: Color::from_rgb(0.35, 0.35, 0.35),
-                        width: 1.0,
-                        radius: 4.0.into(),
-                    },
-                    ..container::Style::default()
-                }),
-        )
-        .height(Length::Fixed(420.0))
-        .into()
+        container(panel)
+            .padding(8)
+            .style(chrome::picker_panel)
+            .into()
     }
 }
 
@@ -309,22 +285,19 @@ pub fn palette_controls<'a>(
     palette: &'a Palette,
     picker: &'a ColorPicker,
 ) -> Element<'a, ControlsMessage> {
-    let mut controls = column![row![
-        text("Palette:").width(110),
+    let mut controls = column![chrome::decorate_pick_list(
         pick_list(
             PaletteKind::ALL,
             Some(palette.kind),
             ControlsMessage::KindSelected,
         )
         .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center),]
+    )]
     .spacing(6);
 
     let mut swatches = row![].spacing(4);
     for &c in &palette.colors {
-        swatches = swatches.push(color_swatch(c, 28.0, 18.0));
+        swatches = swatches.push(color_swatch(c, 22.0, 14.0));
     }
     controls = controls.push(swatches);
 
@@ -332,34 +305,34 @@ pub fn palette_controls<'a>(
         controls = controls
             .push(
                 row![
-                    text("Start:").width(110),
+                    chrome::label("Start").width(chrome::LABEL_WIDTH),
                     clickable_color_swatch(
                         palette.gradient_start,
-                        28.0,
                         22.0,
+                        18.0,
                         ControlsMessage::Picker(Message::Toggle(GradientEndpoint::Start)),
                     ),
-                    text_input("#RRGGBB", &palette.gradient_start_hex)
+                    chrome::field("#RRGGBB", &palette.gradient_start_hex)
                         .on_input(ControlsMessage::GradientStartChanged)
                         .width(Length::Fill),
                 ]
-                .spacing(8)
+                .spacing(6)
                 .align_y(Alignment::Center),
             )
             .push(
                 row![
-                    text("End:").width(110),
+                    chrome::label("End").width(chrome::LABEL_WIDTH),
                     clickable_color_swatch(
                         palette.gradient_end,
-                        28.0,
                         22.0,
+                        18.0,
                         ControlsMessage::Picker(Message::Toggle(GradientEndpoint::End)),
                     ),
-                    text_input("#RRGGBB", &palette.gradient_end_hex)
+                    chrome::field("#RRGGBB", &palette.gradient_end_hex)
                         .on_input(ControlsMessage::GradientEndChanged)
                         .width(Length::Fill),
                 ]
-                .spacing(8)
+                .spacing(6)
                 .align_y(Alignment::Center),
             );
 
@@ -377,13 +350,9 @@ fn rgb_color(rgb: Rgb) -> Color {
 
 fn color_swatch<'a, Message: 'a>(rgb: Rgb, width: f32, height: f32) -> Element<'a, Message> {
     container(Space::new().width(width).height(height))
-        .style(move |_theme: &Theme| container::Style {
+        .style(move |theme: &Theme| container::Style {
             background: Some(Background::Color(rgb_color(rgb))),
-            border: Border {
-                color: Color::from_rgb(0.4, 0.4, 0.4),
-                width: 1.0,
-                radius: 2.0.into(),
-            },
+            border: chrome::swatch_border(theme),
             ..container::Style::default()
         })
         .into()
@@ -409,9 +378,11 @@ fn channel_slider<'a>(
     on_change: impl Fn(f32) -> Message + 'a,
 ) -> Element<'a, Message> {
     row![
-        text(label).width(18),
-        slider(range, value, on_change).step(step),
-        text(value_label).width(48).align_x(Alignment::End),
+        chrome::dim(label).width(14),
+        slider(range, value, on_change)
+            .step(step)
+            .style(chrome::slider_style),
+        chrome::dim(value_label).width(40).align_x(Alignment::End),
     ]
     .spacing(6)
     .align_y(Alignment::Center)

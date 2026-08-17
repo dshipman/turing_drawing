@@ -19,11 +19,13 @@ Debug builds work but the simulation is much slower; prefer `--release`.
 
 ## Controls
 
+The window is a compact toolbar, a left machine pool, a centre drawing, a right inspector, and a status bar. Inspector groups (Canvas, Palette, Simulation) collapse from their headers. Selecting a machine opens its inspector section.
+
 - **Num states / Num symbols** — size of every machine's transition table (defaults: 4 / 3)
 - **Resolution** — size of the drawing grid (default `512 × 512`). Choose a preset (square `512`, `1024`, `2048`; 16:9 and 16:10 fullscreen sizes; MacBook Air/Pro logical and native sizes; 21:9 ultrawide) or type a custom width and height (`64`–`4096`). Changing resolution reallocates the grid, wraps start positions, and clears the drawing (same as Restart).
-- **Palette** — recolor the drawing without changing machine rules. Presets: Classic (original), Grayscale, Sunset, Ocean, Neon. **Gradient** builds colours from user-chosen start and end colours, spanning the current number of symbols (slot 0 = start / untouched background; last active slot = end). Click a start/end swatch for a full colour picker (wheel, HSV, RGB, hex). Changing Num symbols regenerates the gradient.
+- **Palette** — recolor the drawing without changing machine rules. Presets: Classic (original), Grayscale, Sunset, Ocean, Neon. **Gradient** builds colours from user-chosen start and end colours, spanning the current number of symbols (slot 0 = start / untouched background; last active slot = end). Click a start/end swatch for the colour picker (wheel, HSV, RGB); hex is on the Start/End fields. Changing Num symbols regenerates the gradient.
 - **Random** — generate new rules and start positions for every machine
-- **Randomise** — generate new rules and start position for one machine (on that machine's row, and in its details)
+- **Randomise** — generate new rules and start position for one machine (on that machine's row in the left pool)
 - **Speed** (global) — how hard the simulation runs each frame (`0` = paused, `1` = max). This is a fraction of **Max itrs/frame**.
 - **Refresh rate** — target simulation ticks per second (default `60` Hz). Choose a preset (`30`, `60`, `120`, `144`, `165`, `240`) or type a custom integer (`1`–`240`). Each tick also stops if that frame's time budget is used up, so work cannot overrun the chosen period.
 - **Max itrs/frame** — cap on simulation rounds each tick at Speed `1` (default `350000`, range `1000`–`2000000`). Work also yields when the frame's time budget is spent.
@@ -31,10 +33,10 @@ Debug builds work but the simulation is much slower; prefer `--release`.
 - **Restart** — clear the grid and send each head back to its start without changing rules
 - **Presets** — open the preset browser to **Store** the starting setup of all machines (shared state/symbol counts, canvas size, each machine's rules, start position, and speed) to disk, or **Load** / **Delete** a saved preset. Loading replaces the current machines and clears the drawing (same as Restart after swapping rules). Palette, global Speed, Refresh rate, and Max itrs/frame are not saved. Older preset files without a canvas size load at `512 × 512`. Presets live in the app data folder (e.g. `~/Library/Application Support/turing_drawing/presets/` on macOS) as JSON; storing the same name overwrites. The list can be sorted by **Name** or **Date saved** (newest first; default).
 - **Add machine** — append another random machine and reset the drawing
-- **Remove** — drop a machine (not the last one) and reset the drawing; available in that machine's details
+- **Remove** — drop a machine (not the last one) and reset the drawing; available in that machine's inspector
 - **Fullscreen** / **F11** — toggle OS-level window fullscreen
-- **Drawing** — scales to fill available space as you resize the window, keeping the grid's aspect ratio (letterboxed if the window does not match). Double-click the drawing to show only the drawing (maximized in the window); double-click again to restore controls. **Escape** closes the preset browser or machine details, then leaves drawing-only mode and exits fullscreen.
-- **Machines** — the list shows each machine's name, Speed slider, and a Randomise button. Click a name to open its details (live state and position, Speed, shareable encoding, Copy / Load / Randomise / Remove). Click the name again, press Escape, or click outside the panel to close it. Encoding format: `numStates,numSymbols,startX,startY,` then the flat transition table. Original `#hash` URLs (no start fields) load with start `(0,0)`. A leading `#` is stripped on load. With more than one machine, a loaded encoding must match the current state/symbol counts.
+- **Drawing** — fills the centre of the window and keeps the grid's aspect ratio (letterboxed if the window does not match). Double-click the drawing to show only the drawing; double-click again to restore the chrome. **Escape** closes the preset browser, then the machine inspector, then the colour picker, then leaves drawing-only mode and exits fullscreen.
+- **Machines** — the left pool lists each machine with a Speed slider and Randomise. Click a name to select it and show live state, position, shareable encoding, Copy / Load / Remove in the right inspector. Click the name again, press Escape, or click Close to deselect. Encoding format: `numStates,numSymbols,startX,startY,` then the flat transition table. Original `#hash` URLs (no start fields) load with start `(0,0)`. A leading `#` is stripped on load. With more than one machine, a loaded encoding must match the current state/symbol counts.
 
 ## Credit
 
