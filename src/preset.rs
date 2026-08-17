@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::machine::{
-    validate_map_size, wrap_pos, Machine, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH,
-    MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
+    validate_map_size, wrap_pos, Machine, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED,
+    MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
 };
 use crate::program::Program;
 
@@ -22,7 +22,13 @@ pub struct PresetMachine {
     pub start_x: i32,
     pub start_y: i32,
     pub speed: f32,
+    #[serde(default = "default_active")]
+    pub active: bool,
     pub table: Vec<i32>,
+}
+
+fn default_active() -> bool {
+    true
 }
 
 /// Full program starting state saved as a named preset.
@@ -99,6 +105,7 @@ impl Program {
                     start_x: m.start_x,
                     start_y: m.start_y,
                     speed: m.speed,
+                    active: m.active,
                     table: m.table.clone(),
                 })
                 .collect(),
@@ -126,6 +133,7 @@ impl Program {
                     start_x,
                     start_y,
                     speed,
+                    active: m.active,
                     rounds_at_speed: 0,
                     steps_at_speed: 0,
                 }
@@ -398,6 +406,7 @@ mod tests {
             start_x,
             start_y,
             speed,
+            active: true,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -465,6 +474,7 @@ mod tests {
                 start_x: 0,
                 start_y: 0,
                 speed: 0.0,
+                active: true,
                 table: vec![0, 1, 0, 0, 1, 0],
             }],
         };
@@ -637,6 +647,7 @@ mod tests {
                 start_x: 0,
                 start_y: 0,
                 speed: 0.0,
+                active: true,
                 table: vec![0, 1, 0, 0, 1, 0],
             }],
         };

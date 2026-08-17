@@ -46,6 +46,8 @@ pub struct Machine {
     pub start_y: i32,
     /// Relative step-rate slider (`MIN_MACHINE_SPEED`..=`MAX_MACHINE_SPEED`).
     pub speed: f32,
+    /// When false, the machine does not step during simulation.
+    pub active: bool,
     /// Scheduling rounds spent at the current `speed` (for fractional rates).
     pub(crate) rounds_at_speed: u64,
     /// Whole steps already taken during `rounds_at_speed`.
@@ -82,6 +84,7 @@ impl Machine {
             start_x,
             start_y,
             speed: 0.0,
+            active: true,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -236,6 +239,7 @@ impl Machine {
             start_x,
             start_y,
             speed: 0.0,
+            active: true,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         };

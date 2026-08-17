@@ -109,15 +109,23 @@ pub fn picker_panel(_theme: &Theme) -> container::Style {
     }
 }
 
-pub fn machine_card(selected: bool) -> impl Fn(&Theme) -> container::Style {
+pub fn machine_card(selected: bool, active: bool) -> impl Fn(&Theme) -> container::Style {
     move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(if selected {
+        background: Some(Background::Color(if !active {
+            Color::from_rgb8(0x14, 0x14, 0x14)
+        } else if selected {
             Color::from_rgb8(0x2A, 0x24, 0x1C)
         } else {
             Color::from_rgb8(0x18, 0x18, 0x18)
         })),
         border: Border {
-            color: if selected { ACCENT } else { RULE },
+            color: if selected {
+                ACCENT
+            } else if !active {
+                Color::from_rgb8(0x2E, 0x2E, 0x2E)
+            } else {
+                RULE
+            },
             width: 1.0,
             radius: RADIUS.into(),
         },

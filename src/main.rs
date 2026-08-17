@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use iced::keyboard::key;
 use iced::widget::image::Handle;
 use iced::widget::{
-    center, column, container, mouse_area, opaque, pick_list, row, scrollable, slider, stack, Space,
+    center, column, container, mouse_area, opaque, pick_list, row, scrollable, slider, stack,
+    toggler, Space,
 };
 use iced::{
     clipboard, event, keyboard, time, window, Alignment, Element, Event, Length, Size,
@@ -233,6 +234,7 @@ enum Message {
     SelectMachine(usize),
     CloseMachineDetails,
     MachineSpeedChanged(usize, f32),
+    ToggleMachineActive(usize, bool),
     ShareChanged(usize, String),
     CopyShare(usize),
     LoadShare(usize),
@@ -504,6 +506,15 @@ impl App {
             }
             Message::MachineSpeedChanged(i, speed) => {
                 match self.program.set_machine_speed(i, speed) {
+                    Ok(()) => Task::none(),
+                    Err(e) => {
+                        self.status = e;
+                        Task::none()
+                    }
+                }
+            }
+            Message::ToggleMachineActive(i, active) => {
+                match self.program.set_machine_active(i, active) {
                     Ok(()) => Task::none(),
                     Err(e) => {
                         self.status = e;
@@ -839,7 +850,6 @@ impl App {
             row![
                 chrome::compact_button("Random").on_press(Message::Random),
                 chrome::compact_button("Restart").on_press(Message::Restart),
-                chrome::compact_button("Add machine").on_press(Message::AddMachine),
                 chrome::compact_button("Presets").on_press(Message::OpenPresetBrowser),
                 Space::new().width(Length::Fill),
                 chrome::compact_button("Fullscreen").on_press(Message::ToggleFullscreen),
@@ -858,62 +868,80 @@ impl App {
         for i in 0..self.program.machines.len() {
             let selected = self.selected_machine == Some(i);
             let speed = self.program.machines[i].speed;
+            let active = self.program.machines[i].active;
             list = list.push(
-                container(
-                    column![
-                        row![
-                            mouse_area(chrome::value(format!("Machine {}", i + 1)))
-                                .on_press(Message::SelectMachine(i)),
-                            Space::new().width(Length::Fill),
-                            chrome::compact_button("Randomise")
-                                .on_press(Message::RandomizeMachine(i)),
+                mouse_area(
+                    container(
+                        column![
+                            row![
+                                chrome::value(format!("Machine {}", i + 1)),
+                                Space::new().width(Length::Fill),
+                                chrome::dim("Active"),
+                                machine_active_toggler(i, active),
+                                chrome::compact_button("Randomise")
+                                    .on_press(Message::RandomizeMachine(i)),
+                            ]
+                            .spacing(6)
+                            .align_y(Alignment::Center),
+                            machine_speed_slider(i, speed),
                         ]
-                        .spacing(6)
-                        .align_y(Alignment::Center),
-                        machine_speed_slider(i, speed),
-                    ]
-                    .spacing(4),
+                        .spacing(4),
+                    )
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(chrome::machine_card(selected, active)),
                 )
-                .padding(8)
-                .width(Length::Fill)
-                .style(chrome::machine_card(selected)),
+                .on_press(Message::SelectMachine(i)),
             );
         }
 
-        container(
-            column![
+        let mut panel = column![
+            row![
                 container(chrome::dim("MACHINES"))
                     .padding(iced::Padding {
                         top: 8.0,
-                        right: 10.0,
+                        right: 0.0,
                         bottom: 4.0,
                         left: 10.0,
-                    })
-                    .width(Length::Fill),
-                chrome::hrule(),
-                scrollable(list.padding(8))
-                    .style(chrome::scrollable_style)
-                    .width(Length::Fill)
-                    .height(Length::Fill),
+                    }),
+                Space::new().width(Length::Fill),
+                container(
+                    chrome::compact_button("Add machine").on_press(Message::AddMachine),
+                )
+                .padding(iced::Padding {
+                    top: 4.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                    left: 0.0,
+                }),
             ]
-            .height(Length::Fill),
-        )
-        .width(chrome::LEFT_PANEL)
-        .height(Length::Fill)
-        .style(chrome::panel)
-        .into()
-    }
-
-    fn inspector(&self) -> Element<'_, Message> {
-        let mut groups = column![];
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+            chrome::hrule(),
+            scrollable(list.padding(8))
+                .style(chrome::scrollable_style)
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ]
+        .height(Length::Fill);
 
         if let Some(index) = self.selected_machine {
             if index < self.program.machines.len() {
-                groups = groups.push(self.machine_inspector(index));
+                panel = panel
+                    .push(chrome::hrule())
+                    .push(self.machine_inspector(index));
             }
         }
 
-        groups = groups
+        container(panel)
+            .width(chrome::LEFT_PANEL)
+            .height(Length::Fill)
+            .style(chrome::panel)
+            .into()
+    }
+
+    fn inspector(&self) -> Element<'_, Message> {
+        let groups = column![]
             .push(collapsible(
                 "CANVAS",
                 self.canvas_open,
@@ -934,22 +962,10 @@ impl App {
             ));
 
         container(
-            column![
-                container(chrome::dim("INSPECTOR"))
-                    .padding(iced::Padding {
-                        top: 8.0,
-                        right: 10.0,
-                        bottom: 4.0,
-                        left: 10.0,
-                    })
-                    .width(Length::Fill),
-                chrome::hrule(),
-                scrollable(groups)
-                    .style(chrome::scrollable_style)
-                    .width(Length::Fill)
-                    .height(Length::Fill),
-            ]
-            .height(Length::Fill),
+            scrollable(groups.padding(8))
+                .style(chrome::scrollable_style)
+                .width(Length::Fill)
+                .height(Length::Fill),
         )
         .width(chrome::RIGHT_PANEL)
         .height(Length::Fill)
@@ -1129,7 +1145,6 @@ impl App {
                 bottom: 10.0,
                 left: 8.0,
             }),
-            chrome::hrule(),
         ]
         .into()
     }
@@ -1290,6 +1305,12 @@ fn stepper(value: usize, dec: Message, inc: Message) -> Element<'static, Message
     .spacing(4)
     .align_y(Alignment::Center)
     .into()
+}
+
+fn machine_active_toggler(index: usize, active: bool) -> Element<'static, Message> {
+    toggler(active)
+        .on_toggle(move |on| Message::ToggleMachineActive(index, on))
+        .into()
 }
 
 fn machine_speed_slider(index: usize, speed: f32) -> Element<'static, Message> {

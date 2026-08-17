@@ -123,9 +123,11 @@ impl Program {
             return Err("invalid machine index".into());
         }
         let speed = self.machines[index].speed;
+        let active = self.machines[index].active;
         self.machines[index] =
             Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
         self.machines[index].speed = speed;
+        self.machines[index].active = active;
         self.reset();
         Ok(())
     }
@@ -136,6 +138,15 @@ impl Program {
             return Err("invalid machine index".into());
         };
         machine.set_speed(speed);
+        Ok(())
+    }
+
+    /// Enable or disable stepping for one machine.
+    pub fn set_machine_active(&mut self, index: usize, active: bool) -> Result<(), String> {
+        let Some(machine) = self.machines.get_mut(index) else {
+            return Err("invalid machine index".into());
+        };
+        machine.active = active;
         Ok(())
     }
 
@@ -207,7 +218,9 @@ impl Program {
 
         for _ in 0..num_itrs {
             for machine in &mut self.machines {
-                machine.take_scheduled_steps(&mut self.map, num_states, width, height);
+                if machine.active {
+                    machine.take_scheduled_steps(&mut self.map, num_states, width, height);
+                }
             }
             self.itr_count += 1;
         }
@@ -228,6 +241,7 @@ mod tests {
             start_x,
             start_y,
             speed: 0.0,
+            active: true,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -519,6 +533,28 @@ mod tests {
     }
 
     #[test]
+    fn inactive_machine_does_not_step() {
+        let table = vec![0, 1, ACTION_RIGHT as i32];
+        let active = fixed_machine(table.clone(), 0, 0);
+        let mut inactive = fixed_machine(table, 0, 0);
+        inactive.active = false;
+
+        let mut p = Program {
+            num_states: 1,
+            num_symbols: 2,
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            machines: vec![active, inactive],
+            itr_count: 0,
+        };
+
+        p.update(5);
+        assert_ne!(p.machines[0].x_pos, 0);
+        assert_eq!(p.machines[1].x_pos, 0);
+    }
+
+    #[test]
     fn step_rate_is_continuous_through_default() {
         assert!((step_rate(0.0) - 1.0).abs() < 1e-12);
         assert!((step_rate(10.0) - 10.0).abs() < 1e-12);
@@ -541,6 +577,7 @@ mod tests {
         p.set_machine_speed(0, 4.5).unwrap();
         p.randomize_machine(0).unwrap();
         assert_eq!(p.machines[0].speed, 4.5);
+        assert!(p.machines[0].active);
     }
 
     #[test]
