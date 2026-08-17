@@ -22,12 +22,16 @@ Debug builds work but the simulation is much slower; prefer `--release`.
 - **Num states / Num symbols** — size of every machine's transition table (defaults: 4 / 3)
 - **Palette** — recolor the drawing without changing machine rules. Presets: Classic (original), Grayscale, Sunset, Ocean, Neon. **Gradient** builds colours from user-chosen start and end colours, spanning the current number of symbols (slot 0 = start / untouched background; last active slot = end). Click a start/end swatch for a full colour picker (wheel, HSV, RGB, hex). Changing Num symbols regenerates the gradient.
 - **Random** — generate new rules and start positions for every machine
+- **Randomise** — generate new rules and start position for one machine (on that machine's row, and in its details)
+- **Speed** (global) — how hard the simulation runs each frame (`0` = paused, `1` = max)
+- **Speed** (per machine) — how often that machine steps relative to the others. The slider is continuous from `−10` to `+10` (step `0.1`). `0` is the default rate (one step per round). Frequency is `10^(speed / 10)`, so `+10` is ten times more often and `−10` is ten times less often. Changing speed does not reset the drawing.
 - **Restart** — clear the grid and send each head back to its start without changing rules
+- **Presets** — open the preset browser to **Store** the starting setup of all machines (shared state/symbol counts, each machine's rules, start position, and speed) to disk, or **Load** / **Delete** a saved preset. Loading replaces the current machines and clears the drawing (same as Restart after swapping rules). Palette and global Speed are not saved. Presets live in the app data folder (e.g. `~/Library/Application Support/turing_drawing/presets/` on macOS) as JSON; storing the same name overwrites.
 - **Add machine** — append another random machine and reset the drawing
-- **Remove** — drop a machine (not the last one) and reset the drawing
+- **Remove** — drop a machine (not the last one) and reset the drawing; available in that machine's details
 - **Fullscreen** / **F11** — toggle OS-level window fullscreen
-- **Drawing** — scales to fill available space as you resize the window. Double-click the drawing to show only the drawing (maximized in the window); double-click again to restore controls. **Escape** leaves drawing-only mode and exits fullscreen.
-- **Shareable encoding** — one field per machine. Format: `numStates,numSymbols,startX,startY,` then the flat transition table. Original `#hash` URLs (no start fields) load with start `(0,0)`. A leading `#` is stripped on load. With more than one machine, a loaded encoding must match the current state/symbol counts.
+- **Drawing** — scales to fill available space as you resize the window. Double-click the drawing to show only the drawing (maximized in the window); double-click again to restore controls. **Escape** closes the preset browser or machine details, then leaves drawing-only mode and exits fullscreen.
+- **Machines** — the list shows each machine's name, Speed slider, and a Randomise button. Click a name to open its details (live state and position, Speed, shareable encoding, Copy / Load / Randomise / Remove). Click the name again, press Escape, or click outside the panel to close it. Encoding format: `numStates,numSymbols,startX,startY,` then the flat transition table. Original `#hash` URLs (no start fields) load with start `(0,0)`. A leading `#` is stripped on load. With more than one machine, a loaded encoding must match the current state/symbol counts.
 
 ## Credit
 

@@ -7,9 +7,12 @@ license = "BSD-3-Clause"
 readme = "README.md"
 
 [dependencies]
+dirs = "6"
 iced = { version = "0.14", features = ["canvas", "image-without-codecs", "tokio"] }
 iced_color_wheel = "0.1"
 rand = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [profile.release]
 lto = true

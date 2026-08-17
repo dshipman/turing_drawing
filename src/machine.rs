@@ -21,6 +21,10 @@ pub const MAX_STATES: usize = 32;
 pub const MIN_SYMBOLS: usize = 2;
 pub const MAX_SYMBOLS: usize = 8;
 
+/// Per-machine speed slider: `0` is default (1×), `+10` is 10×, `-10` is 1/10×.
+pub const MIN_MACHINE_SPEED: f32 = -10.0;
+pub const MAX_MACHINE_SPEED: f32 = 10.0;
+
 /// A decoded share string: dimensions plus the machine they describe.
 #[derive(Debug, Clone)]
 pub struct ParsedMachine {
@@ -39,6 +43,12 @@ pub struct Machine {
     pub y_pos: i32,
     pub start_x: i32,
     pub start_y: i32,
+    /// Relative step-rate slider (`MIN_MACHINE_SPEED`..=`MAX_MACHINE_SPEED`).
+    pub speed: f32,
+    /// Scheduling rounds spent at the current `speed` (for fractional rates).
+    pub(crate) rounds_at_speed: u64,
+    /// Whole steps already taken during `rounds_at_speed`.
+    pub(crate) steps_at_speed: u64,
 }
 
 impl Machine {
@@ -69,6 +79,35 @@ impl Machine {
             y_pos: start_y,
             start_x,
             start_y,
+            speed: 0.0,
+            rounds_at_speed: 0,
+            steps_at_speed: 0,
+        }
+    }
+
+    pub fn set_speed(&mut self, speed: f32) {
+        let speed = speed.clamp(MIN_MACHINE_SPEED, MAX_MACHINE_SPEED);
+        if speed != self.speed {
+            self.speed = speed;
+            self.rounds_at_speed = 0;
+            self.steps_at_speed = 0;
+        }
+    }
+
+    /// Accrue this round's floating-point rate and take any whole steps due.
+    pub fn take_scheduled_steps(
+        &mut self,
+        map: &mut [i32],
+        num_states: usize,
+        width: i32,
+        height: i32,
+    ) {
+        self.rounds_at_speed += 1;
+        let due = (step_rate(self.speed) * self.rounds_at_speed as f64).floor() as u64;
+        let steps = due.saturating_sub(self.steps_at_speed);
+        self.steps_at_speed = due;
+        for _ in 0..steps {
+            self.step(map, num_states, width, height);
         }
     }
 
@@ -76,6 +115,8 @@ impl Machine {
         self.state = 0;
         self.x_pos = self.start_x;
         self.y_pos = self.start_y;
+        self.rounds_at_speed = 0;
+        self.steps_at_speed = 0;
     }
 
     /// One read / write / move on the shared tape.
@@ -190,6 +231,9 @@ impl Machine {
             y_pos: start_y,
             start_x,
             start_y,
+            speed: 0.0,
+            rounds_at_speed: 0,
+            steps_at_speed: 0,
         };
 
         Ok(ParsedMachine {
@@ -198,6 +242,15 @@ impl Machine {
             machine,
         })
     }
+}
+
+/// Relative step rate for a speed slider value.
+///
+/// `0` → 1×, `+10` → 10×, `−10` → 1/10×. Intermediate values use
+/// `10^(speed / 10)` so frequency scales continuously through the default.
+pub fn step_rate(speed: f32) -> f64 {
+    let speed = speed.clamp(MIN_MACHINE_SPEED, MAX_MACHINE_SPEED);
+    10f64.powf(f64::from(speed) / 10.0)
 }
 
 #[inline]

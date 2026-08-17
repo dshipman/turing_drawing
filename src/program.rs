@@ -3,7 +3,8 @@
 use crate::machine::{Machine, MAP_LEN};
 
 pub use crate::machine::{
-    MAP_HEIGHT, MAP_WIDTH, MAX_STATES, MAX_SYMBOLS, MIN_STATES, MIN_SYMBOLS,
+    step_rate, MAP_HEIGHT, MAP_WIDTH, MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS,
+    MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
 };
 
 /// The program: shared grid, shared alphabet size, and the machines that draw on it.
@@ -62,11 +63,38 @@ impl Program {
 
         self.num_states = num_states;
         self.num_symbols = num_symbols;
+        let speeds: Vec<f32> = self.machines.iter().map(|m| m.speed).collect();
         let n = self.machines.len().max(1);
         self.machines = (0..n)
             .map(|_| Machine::new_random(num_states, num_symbols))
             .collect();
+        for (machine, speed) in self.machines.iter_mut().zip(speeds) {
+            machine.speed = speed;
+        }
         self.reset();
+    }
+
+    /// Replace one machine with a new random table and start, then reset.
+    /// Uses the program's current state/symbol counts so other machines stay valid.
+    /// Keeps the slot's speed slider.
+    pub fn randomize_machine(&mut self, index: usize) -> Result<(), String> {
+        if index >= self.machines.len() {
+            return Err("invalid machine index".into());
+        }
+        let speed = self.machines[index].speed;
+        self.machines[index] = Machine::new_random(self.num_states, self.num_symbols);
+        self.machines[index].speed = speed;
+        self.reset();
+        Ok(())
+    }
+
+    /// Set one machine's relative speed slider (`MIN_MACHINE_SPEED`..=`MAX_MACHINE_SPEED`).
+    pub fn set_machine_speed(&mut self, index: usize, speed: f32) -> Result<(), String> {
+        let Some(machine) = self.machines.get_mut(index) else {
+            return Err("invalid machine index".into());
+        };
+        machine.set_speed(speed);
+        Ok(())
     }
 
     /// Append a random machine with the current counts, then reset the program.
@@ -97,10 +125,12 @@ impl Program {
         }
 
         let parsed = Machine::from_string(s)?;
+        let speed = self.machines[index].speed;
         if self.machines.len() == 1 {
             self.num_states = parsed.num_states;
             self.num_symbols = parsed.num_symbols;
             self.machines[0] = parsed.machine;
+            self.machines[0].speed = speed;
             self.reset();
             return Ok(());
         }
@@ -113,6 +143,7 @@ impl Program {
         }
 
         self.machines[index] = parsed.machine;
+        self.machines[index].speed = speed;
         self.reset();
         Ok(())
     }
@@ -121,7 +152,8 @@ impl Program {
         self.machines[index].to_string(self.num_states, self.num_symbols)
     }
 
-    /// Run `num_itrs` interleaved rounds: each machine takes one step in order.
+    /// Run `num_itrs` interleaved rounds. Each machine accrues its floating-point
+    /// step rate and takes any whole steps that are due (default: one per round).
     pub fn update(&mut self, num_itrs: usize) {
         let width = MAP_WIDTH as i32;
         let height = MAP_HEIGHT as i32;
@@ -129,7 +161,7 @@ impl Program {
 
         for _ in 0..num_itrs {
             for machine in &mut self.machines {
-                machine.step(&mut self.map, num_states, width, height);
+                machine.take_scheduled_steps(&mut self.map, num_states, width, height);
             }
             self.itr_count += 1;
         }
@@ -149,6 +181,9 @@ mod tests {
             y_pos: start_y,
             start_x,
             start_y,
+            speed: 0.0,
+            rounds_at_speed: 0,
+            steps_at_speed: 0,
         }
     }
 
@@ -365,5 +400,88 @@ mod tests {
         let mut p = Program::new_random(2, 2);
         assert!(p.remove_machine(0).is_err());
         assert_eq!(p.machines.len(), 1);
+    }
+
+    #[test]
+    fn randomize_machine_replaces_only_that_machine() {
+        let mut p = Program::new_random(4, 3);
+        p.add_machine();
+        let other = p.machines[1].clone();
+        p.update(10);
+        assert!(p.itr_count > 0);
+
+        p.randomize_machine(0).unwrap();
+        assert_eq!(p.machines.len(), 2);
+        assert_eq!(p.machines[1].table, other.table);
+        assert_eq!(p.machines[1].start_x, other.start_x);
+        assert_eq!(p.machines[1].start_y, other.start_y);
+        assert_eq!(p.itr_count, 0);
+        assert!(p.map.iter().all(|&s| s == 0));
+        assert_eq!(p.machines[0].x_pos, p.machines[0].start_x);
+        assert_eq!(p.machines[1].x_pos, p.machines[1].start_x);
+        assert!(p.randomize_machine(5).is_err());
+    }
+
+    #[test]
+    fn machine_speed_scales_steps() {
+        // Always move +x, independent of the symbol read.
+        let table = vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT];
+        let fast = {
+            let mut m = fixed_machine(table.clone(), 0, 0);
+            m.speed = 10.0;
+            m
+        };
+        let slow = {
+            let mut m = fixed_machine(table.clone(), 0, 1);
+            m.speed = -10.0;
+            m
+        };
+        let mid = {
+            let mut m = fixed_machine(table.clone(), 0, 3);
+            m.speed = 5.0;
+            m
+        };
+        let normal = fixed_machine(table, 0, 2);
+        let mut p = Program {
+            num_states: 1,
+            num_symbols: 2,
+            map: vec![0; MAP_LEN],
+            machines: vec![fast, slow, normal, mid],
+            itr_count: 0,
+        };
+
+        p.update(10);
+        assert_eq!(p.machines[0].x_pos, 100);
+        assert_eq!(p.machines[1].x_pos, 1);
+        assert_eq!(p.machines[2].x_pos, 10);
+        assert_eq!(
+            p.machines[3].x_pos,
+            (step_rate(5.0) * 10.0).floor() as i32
+        );
+    }
+
+    #[test]
+    fn step_rate_is_continuous_through_default() {
+        assert!((step_rate(0.0) - 1.0).abs() < 1e-12);
+        assert!((step_rate(10.0) - 10.0).abs() < 1e-12);
+        assert!((step_rate(-10.0) - 0.1).abs() < 1e-12);
+        assert!(step_rate(2.5) > 1.0 && step_rate(2.5) < step_rate(5.0));
+        assert!(step_rate(-2.5) < 1.0 && step_rate(-2.5) > step_rate(-5.0));
+    }
+
+    #[test]
+    fn set_machine_speed_clamps_and_is_kept_on_randomize() {
+        let mut p = Program::new_random(2, 2);
+        p.set_machine_speed(0, 7.25).unwrap();
+        assert_eq!(p.machines[0].speed, 7.25);
+        p.set_machine_speed(0, 99.0).unwrap();
+        assert_eq!(p.machines[0].speed, MAX_MACHINE_SPEED);
+        p.set_machine_speed(0, -99.0).unwrap();
+        assert_eq!(p.machines[0].speed, MIN_MACHINE_SPEED);
+        assert!(p.set_machine_speed(3, 0.0).is_err());
+
+        p.set_machine_speed(0, 4.5).unwrap();
+        p.randomize_machine(0).unwrap();
+        assert_eq!(p.machines[0].speed, 4.5);
     }
 }
