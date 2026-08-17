@@ -1075,12 +1075,14 @@ impl App {
     }
 
     fn palette_group(&self) -> Element<'_, Message> {
-        color_picker::palette_controls(&self.palette, &self.color_picker).map(|msg| match msg {
-            ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
-            ControlsMessage::GradientStartChanged(hex) => Message::GradientStartChanged(hex),
-            ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
-            ControlsMessage::Picker(m) => Message::ColorPicker(m),
-        })
+        color_picker::palette_controls(&self.palette, &self.color_picker, self.num_symbols).map(
+            |msg| match msg {
+                ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
+                ControlsMessage::GradientStartChanged(hex) => Message::GradientStartChanged(hex),
+                ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
+                ControlsMessage::Picker(m) => Message::ColorPicker(m),
+            },
+        )
     }
 
     fn simulation_group(&self) -> Element<'_, Message> {

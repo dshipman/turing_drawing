@@ -284,6 +284,7 @@ impl ColorPicker {
 pub fn palette_controls<'a>(
     palette: &'a Palette,
     picker: &'a ColorPicker,
+    num_symbols: usize,
 ) -> Element<'a, ControlsMessage> {
     let mut controls = column![chrome::decorate_pick_list(
         pick_list(
@@ -296,7 +297,8 @@ pub fn palette_controls<'a>(
     .spacing(6);
 
     let mut swatches = row![].spacing(4);
-    for &c in &palette.colors {
+    let shown = num_symbols.clamp(2, palette.colors.len());
+    for &c in palette.colors.iter().take(shown) {
         swatches = swatches.push(color_swatch(c, 22.0, 14.0));
     }
     controls = controls.push(swatches);

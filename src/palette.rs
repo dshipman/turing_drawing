@@ -122,13 +122,18 @@ impl Palette {
     }
 
     /// Rebuild `colors` from the current kind / gradient endpoints.
+    ///
+    /// Named palettes (except Classic) pick evenly across the full source
+    /// range so a small symbol count still reaches the bright end. Classic
+    /// keeps the original first-N `colorMap` so red / black / white stay
+    /// symbols 0–2.
     pub fn resolve(&mut self, num_symbols: usize) {
         self.colors = match self.kind {
             PaletteKind::Classic => CLASSIC,
-            PaletteKind::Grayscale => GRAYSCALE,
-            PaletteKind::Sunset => SUNSET,
-            PaletteKind::Ocean => OCEAN,
-            PaletteKind::Neon => NEON,
+            PaletteKind::Grayscale => sample_palette(&GRAYSCALE, num_symbols),
+            PaletteKind::Sunset => sample_palette(&SUNSET, num_symbols),
+            PaletteKind::Ocean => sample_palette(&OCEAN, num_symbols),
+            PaletteKind::Neon => sample_palette(&NEON, num_symbols),
             PaletteKind::Gradient => {
                 gradient_colors(self.gradient_start, self.gradient_end, num_symbols)
             }
@@ -191,6 +196,19 @@ impl Palette {
             Err(e) => Err(e),
         }
     }
+}
+
+/// Spread `num_symbols` slots across a fixed source palette.
+/// Unused slots copy the last source colour.
+fn sample_palette(source: &[Rgb; MAX_SYMBOLS], num_symbols: usize) -> [Rgb; MAX_SYMBOLS] {
+    let n = num_symbols.clamp(2, MAX_SYMBOLS);
+    let last = source[MAX_SYMBOLS - 1];
+    let mut colors = [last; MAX_SYMBOLS];
+    for (i, slot) in colors.iter_mut().enumerate().take(n) {
+        let idx = i * (MAX_SYMBOLS - 1) / (n - 1);
+        *slot = source[idx];
+    }
+    colors
 }
 
 /// Linear RGB gradient across `num_symbols` slots; unused slots copy the end colour.
@@ -283,10 +301,38 @@ mod tests {
     }
 
     #[test]
+    fn sample_palette_spans_full_range() {
+        // 2 symbols: first and last. 3: first, mid, last. 8: every source slot.
+        let two = sample_palette(&GRAYSCALE, 2);
+        assert_eq!(two[0], GRAYSCALE[0]);
+        assert_eq!(two[1], GRAYSCALE[7]);
+        for i in 2..MAX_SYMBOLS {
+            assert_eq!(two[i], GRAYSCALE[7]);
+        }
+
+        let three = sample_palette(&SUNSET, 3);
+        assert_eq!(three[0], SUNSET[0]);
+        assert_eq!(three[1], SUNSET[3]);
+        assert_eq!(three[2], SUNSET[7]);
+
+        let full = sample_palette(&OCEAN, 8);
+        assert_eq!(full, OCEAN);
+    }
+
+    #[test]
     fn palette_resolve_classic() {
         let mut p = Palette::classic();
         p.resolve(3);
         assert_eq!(p.colors, CLASSIC);
+    }
+
+    #[test]
+    fn palette_resolve_named_uses_full_range() {
+        let mut p = Palette::classic();
+        p.set_kind(PaletteKind::Grayscale, 3);
+        assert_eq!(p.colors[0], GRAYSCALE[0]);
+        assert_eq!(p.colors[1], GRAYSCALE[3]);
+        assert_eq!(p.colors[2], GRAYSCALE[7]);
     }
 
     #[test]
