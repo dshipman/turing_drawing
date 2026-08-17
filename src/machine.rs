@@ -6,9 +6,10 @@
 
 use rand::Rng;
 
-pub const MAP_WIDTH: usize = 512;
-pub const MAP_HEIGHT: usize = 512;
-pub const MAP_LEN: usize = MAP_WIDTH * MAP_HEIGHT;
+pub const DEFAULT_MAP_WIDTH: usize = 512;
+pub const DEFAULT_MAP_HEIGHT: usize = 512;
+pub const MIN_MAP_SIZE: usize = 64;
+pub const MAX_MAP_SIZE: usize = 4096;
 
 pub const ACTION_LEFT: i32 = 0;
 pub const ACTION_RIGHT: i32 = 1;
@@ -52,9 +53,10 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn new_random(num_states: usize, num_symbols: usize) -> Self {
+    pub fn new_random(num_states: usize, num_symbols: usize, width: usize, height: usize) -> Self {
         assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
+        assert!(validate_map_size(width, height).is_ok());
 
         let mut rng = rand::rng();
         let mut table = vec![0i32; num_states * num_symbols * 3];
@@ -69,8 +71,8 @@ impl Machine {
             }
         }
 
-        let start_x = rng.random_range(0..MAP_WIDTH as i32);
-        let start_y = rng.random_range(0..MAP_HEIGHT as i32);
+        let start_x = rng.random_range(0..width as i32);
+        let start_y = rng.random_range(0..height as i32);
 
         Self {
             table,
@@ -180,7 +182,9 @@ impl Machine {
     ///
     /// Accepts the original `numStates,numSymbols,table...` form (start `(0,0)`)
     /// and the extended `numStates,numSymbols,startX,startY,table...` form.
-    pub fn from_string(s: &str) -> Result<ParsedMachine, String> {
+    /// Start coordinates wrap to `width` × `height`.
+    pub fn from_string(s: &str, width: usize, height: usize) -> Result<ParsedMachine, String> {
+        validate_map_size(width, height)?;
         let s = s.trim().trim_start_matches('#');
         if s.is_empty() {
             return Err("empty encoding".into());
@@ -212,8 +216,8 @@ impl Machine {
             (0, 0, nums[2..].to_vec())
         } else if nums.len() == 4 + expected {
             (
-                wrap_pos(nums[2], MAP_WIDTH as i32),
-                wrap_pos(nums[3], MAP_HEIGHT as i32),
+                wrap_pos(nums[2], width as i32),
+                wrap_pos(nums[3], height as i32),
                 nums[4..].to_vec(),
             )
         } else {
@@ -244,6 +248,20 @@ impl Machine {
     }
 }
 
+pub fn validate_map_size(width: usize, height: usize) -> Result<(), String> {
+    if !(MIN_MAP_SIZE..=MAX_MAP_SIZE).contains(&width) {
+        return Err(format!(
+            "map width must be {MIN_MAP_SIZE}..={MAX_MAP_SIZE}, got {width}"
+        ));
+    }
+    if !(MIN_MAP_SIZE..=MAX_MAP_SIZE).contains(&height) {
+        return Err(format!(
+            "map height must be {MIN_MAP_SIZE}..={MAX_MAP_SIZE}, got {height}"
+        ));
+    }
+    Ok(())
+}
+
 /// Relative step rate for a speed slider value.
 ///
 /// `0` → 1×, `+10` → 10×, `−10` → 1/10×. Intermediate values use
@@ -258,7 +276,7 @@ fn trans_index(num_states: usize, state: usize, symbol: usize) -> usize {
     (num_states * symbol + state) * 3
 }
 
-fn wrap_pos(v: i32, dim: i32) -> i32 {
+pub(crate) fn wrap_pos(v: i32, dim: i32) -> i32 {
     v.rem_euclid(dim)
 }
 

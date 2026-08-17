@@ -1,10 +1,10 @@
 //! Shared tape plus one or more machines that step on it in order.
 
-use crate::machine::{Machine, MAP_LEN};
+use crate::machine::{validate_map_size, wrap_pos, Machine};
 
 pub use crate::machine::{
-    step_rate, MAP_HEIGHT, MAP_WIDTH, MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS,
-    MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
+    step_rate, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_STATES,
+    MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_STATES, MIN_SYMBOLS,
 };
 
 /// The program: shared grid, shared alphabet size, and the machines that draw on it.
@@ -12,6 +12,8 @@ pub use crate::machine::{
 pub struct Program {
     pub num_states: usize,
     pub num_symbols: usize,
+    pub width: usize,
+    pub height: usize,
     pub map: Vec<i32>,
     pub machines: Vec<Machine>,
     pub itr_count: u64,
@@ -19,27 +21,46 @@ pub struct Program {
 
 impl Program {
     pub fn new_random(num_states: usize, num_symbols: usize) -> Self {
+        Self::new_random_sized(
+            num_states,
+            num_symbols,
+            DEFAULT_MAP_WIDTH,
+            DEFAULT_MAP_HEIGHT,
+        )
+    }
+
+    pub fn new_random_sized(
+        num_states: usize,
+        num_symbols: usize,
+        width: usize,
+        height: usize,
+    ) -> Self {
         assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
+        assert!(validate_map_size(width, height).is_ok());
 
         let mut prog = Self {
             num_states,
             num_symbols,
-            map: vec![0; MAP_LEN],
-            machines: vec![Machine::new_random(num_states, num_symbols)],
+            width,
+            height,
+            map: vec![0; width * height],
+            machines: vec![Machine::new_random(num_states, num_symbols, width, height)],
             itr_count: 0,
         };
         prog.reset();
         prog
     }
 
-    /// Parse a single-machine encoding into a one-machine program.
+    /// Parse a single-machine encoding into a one-machine program on the default canvas.
     pub fn from_string(s: &str) -> Result<Self, String> {
-        let parsed = Machine::from_string(s)?;
+        let parsed = Machine::from_string(s, DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT)?;
         let mut prog = Self {
             num_states: parsed.num_states,
             num_symbols: parsed.num_symbols,
-            map: vec![0; MAP_LEN],
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![parsed.machine],
             itr_count: 0,
         };
@@ -55,6 +76,25 @@ impl Program {
         }
     }
 
+    /// Resize the canvas, wrap start positions, and reset the drawing.
+    pub fn set_size(&mut self, width: usize, height: usize) -> Result<(), String> {
+        validate_map_size(width, height)?;
+        if width == self.width && height == self.height {
+            return Ok(());
+        }
+        self.width = width;
+        self.height = height;
+        self.map = vec![0; width * height];
+        let w = width as i32;
+        let h = height as i32;
+        for machine in &mut self.machines {
+            machine.start_x = wrap_pos(machine.start_x, w);
+            machine.start_y = wrap_pos(machine.start_y, h);
+        }
+        self.reset();
+        Ok(())
+    }
+
     /// Replace every machine with a new random table and start, using `num_states` /
     /// `num_symbols`. Keeps the current machine count.
     pub fn randomize(&mut self, num_states: usize, num_symbols: usize) {
@@ -65,8 +105,9 @@ impl Program {
         self.num_symbols = num_symbols;
         let speeds: Vec<f32> = self.machines.iter().map(|m| m.speed).collect();
         let n = self.machines.len().max(1);
+        let (width, height) = (self.width, self.height);
         self.machines = (0..n)
-            .map(|_| Machine::new_random(num_states, num_symbols))
+            .map(|_| Machine::new_random(num_states, num_symbols, width, height))
             .collect();
         for (machine, speed) in self.machines.iter_mut().zip(speeds) {
             machine.speed = speed;
@@ -82,7 +123,8 @@ impl Program {
             return Err("invalid machine index".into());
         }
         let speed = self.machines[index].speed;
-        self.machines[index] = Machine::new_random(self.num_states, self.num_symbols);
+        self.machines[index] =
+            Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
         self.machines[index].speed = speed;
         self.reset();
         Ok(())
@@ -99,8 +141,12 @@ impl Program {
 
     /// Append a random machine with the current counts, then reset the program.
     pub fn add_machine(&mut self) {
-        self.machines
-            .push(Machine::new_random(self.num_states, self.num_symbols));
+        self.machines.push(Machine::new_random(
+            self.num_states,
+            self.num_symbols,
+            self.width,
+            self.height,
+        ));
         self.reset();
     }
 
@@ -124,7 +170,7 @@ impl Program {
             return Err("invalid machine index".into());
         }
 
-        let parsed = Machine::from_string(s)?;
+        let parsed = Machine::from_string(s, self.width, self.height)?;
         let speed = self.machines[index].speed;
         if self.machines.len() == 1 {
             self.num_states = parsed.num_states;
@@ -155,8 +201,8 @@ impl Program {
     /// Run `num_itrs` interleaved rounds. Each machine accrues its floating-point
     /// step rate and takes any whole steps that are due (default: one per round).
     pub fn update(&mut self, num_itrs: usize) {
-        let width = MAP_WIDTH as i32;
-        let height = MAP_HEIGHT as i32;
+        let width = self.width as i32;
+        let height = self.height as i32;
         let num_states = self.num_states;
 
         for _ in 0..num_itrs {
@@ -197,7 +243,9 @@ mod tests {
         Program {
             num_states,
             num_symbols,
-            map: vec![0; MAP_LEN],
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![fixed_machine(table, start_x, start_y)],
             itr_count: 0,
         }
@@ -249,8 +297,9 @@ mod tests {
         assert_eq!(p.map[0], 1);
 
         // Wrap at right edge
-        p.machines[0].x_pos = (MAP_WIDTH - 1) as i32;
-        p.map[MAP_WIDTH - 1] = 0;
+        let width = p.width;
+        p.machines[0].x_pos = (width - 1) as i32;
+        p.map[width - 1] = 0;
         p.update(1);
         assert_eq!(p.machines[0].x_pos, 0);
     }
@@ -259,7 +308,7 @@ mod tests {
     fn wrap_right_decrements_x() {
         let mut p = fixed_program(1, 2, vec![0, 1, ACTION_RIGHT], 0, 0);
         p.update(1);
-        assert_eq!(p.machines[0].x_pos, (MAP_WIDTH - 1) as i32);
+        assert_eq!(p.machines[0].x_pos, (p.width - 1) as i32);
     }
 
     #[test]
@@ -364,7 +413,9 @@ mod tests {
         let mut p = Program {
             num_states: 1,
             num_symbols: 3,
-            map: vec![0; MAP_LEN],
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![m0, m1],
             itr_count: 0,
         };
@@ -372,7 +423,7 @@ mod tests {
         p.update(1);
         assert_eq!(p.map[0], 2);
         assert_eq!(p.machines[0].x_pos, 1);
-        assert_eq!(p.machines[1].x_pos, (MAP_WIDTH - 1) as i32);
+        assert_eq!(p.machines[1].x_pos, (p.width - 1) as i32);
         assert_eq!(p.itr_count, 1);
     }
 
@@ -382,7 +433,7 @@ mod tests {
         p.add_machine();
         assert_eq!(p.machines.len(), 2);
 
-        let other = Machine::new_random(2, 2);
+        let other = Machine::new_random(2, 2, p.width, p.height);
         let enc = other.to_string(2, 2);
         let err = p.load_machine(0, &enc).unwrap_err();
         assert!(err.contains("4 states") && err.contains("3 symbols"));
@@ -394,7 +445,7 @@ mod tests {
     #[test]
     fn load_single_machine_may_change_counts() {
         let mut p = Program::new_random(4, 3);
-        let other = Machine::new_random(2, 2);
+        let other = Machine::new_random(2, 2, p.width, p.height);
         let enc = other.to_string(2, 2);
         p.load_machine(0, &enc).unwrap();
         assert_eq!(p.num_states, 2);
@@ -453,7 +504,9 @@ mod tests {
         let mut p = Program {
             num_states: 1,
             num_symbols: 2,
-            map: vec![0; MAP_LEN],
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![fast, slow, normal, mid],
             itr_count: 0,
         };
@@ -488,5 +541,50 @@ mod tests {
         p.set_machine_speed(0, 4.5).unwrap();
         p.randomize_machine(0).unwrap();
         assert_eq!(p.machines[0].speed, 4.5);
+    }
+
+    #[test]
+    fn wrap_on_nonsquare_canvas() {
+        let mut p = Program {
+            num_states: 1,
+            num_symbols: 2,
+            width: 10,
+            height: 8,
+            map: vec![0; 80],
+            machines: vec![fixed_machine(vec![0, 1, ACTION_LEFT], 9, 0)],
+            itr_count: 0,
+        };
+        p.update(1);
+        assert_eq!(p.machines[0].x_pos, 0);
+        assert_eq!(p.machines[0].y_pos, 0);
+        assert_eq!(p.map[9], 1);
+
+        p.machines[0].x_pos = 0;
+        p.machines[0].y_pos = 7;
+        p.machines[0].table = vec![0, 1, ACTION_DOWN];
+        p.map[7 * 10] = 0;
+        p.update(1);
+        assert_eq!(p.machines[0].y_pos, 0);
+        assert_eq!(p.map[7 * 10], 1);
+    }
+
+    #[test]
+    fn set_size_reallocates_and_wraps_starts() {
+        let mut p = Program::new_random(2, 2);
+        p.machines[0].start_x = 500;
+        p.machines[0].start_y = 500;
+        p.set_size(128, 64).unwrap();
+        assert_eq!(p.width, 128);
+        assert_eq!(p.height, 64);
+        assert_eq!(p.map.len(), 128 * 64);
+        assert_eq!(p.machines[0].start_x, wrap_pos(500, 128));
+        assert_eq!(p.machines[0].start_y, wrap_pos(500, 64));
+        assert_eq!(p.machines[0].x_pos, p.machines[0].start_x);
+        assert_eq!(p.itr_count, 0);
+        assert!(p.map.iter().all(|&s| s == 0));
+        assert!(p.set_size(10, 512).is_err());
+        assert!(p.set_size(512, 5000).is_err());
+        p.set_size(128, 64).unwrap();
+        assert_eq!(p.width, 128);
     }
 }

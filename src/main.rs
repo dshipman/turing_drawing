@@ -1,4 +1,5 @@
 mod color_picker;
+mod drawing;
 mod machine;
 mod palette;
 mod preset;
@@ -7,22 +8,23 @@ mod program;
 use std::time::{Duration, Instant};
 
 use iced::keyboard::key;
-use iced::widget::image::{FilterMethod, Handle};
+use iced::widget::image::Handle;
 use iced::widget::{
-    button, center, column, container, image, mouse_area, opaque, pick_list, row, scrollable,
+    button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
     slider, stack, text, text_input, Space,
 };
 use iced::{
-    clipboard, event, keyboard, time, window, Alignment, Background, Border, Color, ContentFit,
+    clipboard, event, keyboard, time, window, Alignment, Background, Border, Color,
     Element, Event, Length, Size, Subscription, Task, Theme,
 };
 
 use color_picker::{ColorPicker, ControlsMessage, GradientEndpoint};
+use drawing::simulation_frame;
 use palette::{Palette, PaletteKind, Rgb};
 use preset::{PresetInfo, PresetSort};
 use program::{
-    step_rate, Program, MAP_HEIGHT, MAP_WIDTH, MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS,
-    MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
+    step_rate, Program, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED, MAX_MAP_SIZE,
+    MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_STATES, MIN_SYMBOLS,
 };
 
 const DEFAULT_REFRESH_HZ: u32 = 60;
@@ -40,6 +42,26 @@ const DEFAULT_MAX_ITRS: u64 = 350_000;
 const MIN_MAX_ITRS: u64 = 1_000;
 const MAX_MAX_ITRS: u64 = 2_000_000;
 const CHUNK: usize = 5_000;
+const RESOLUTION_PRESETS: [ResolutionPreset; 18] = [
+    ResolutionPreset::square(512, "512 × 512"),
+    ResolutionPreset::square(1024, "1024 × 1024"),
+    ResolutionPreset::square(2048, "2048 × 2048"),
+    ResolutionPreset::new(1280, 720, "1280 × 720 (16:9)"),
+    ResolutionPreset::new(1920, 1080, "1920 × 1080 (16:9)"),
+    ResolutionPreset::new(2560, 1440, "2560 × 1440 (16:9)"),
+    ResolutionPreset::new(3840, 2160, "3840 × 2160 (16:9)"),
+    ResolutionPreset::new(1280, 800, "1280 × 800 (16:10)"),
+    ResolutionPreset::new(1440, 900, "1440 × 900 (16:10)"),
+    ResolutionPreset::new(1920, 1200, "1920 × 1200 (16:10)"),
+    ResolutionPreset::new(2560, 1600, "2560 × 1600 (16:10)"),
+    ResolutionPreset::new(1470, 956, "1470 × 956 (13\" MacBook Air)"),
+    ResolutionPreset::new(1512, 982, "1512 × 982 (14\" MacBook Pro)"),
+    ResolutionPreset::new(1728, 1117, "1728 × 1117 (16\" MacBook Pro)"),
+    ResolutionPreset::new(2560, 1664, "2560 × 1664 (13\" Air native)"),
+    ResolutionPreset::new(2880, 1864, "2880 × 1864 (15\" Air native)"),
+    ResolutionPreset::new(2560, 1080, "2560 × 1080 (21:9)"),
+    ResolutionPreset::new(3440, 1440, "3440 × 1440 (21:9)"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct RefreshPreset(u32);
@@ -64,6 +86,46 @@ fn parse_refresh_hz(text: &str) -> Result<u32, String> {
         Ok(hz) => Ok(hz.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ)),
         Err(_) => Err(format!(
             "Refresh rate must be an integer {MIN_REFRESH_HZ}..={MAX_REFRESH_HZ}"
+        )),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ResolutionPreset {
+    width: usize,
+    height: usize,
+    label: &'static str,
+}
+
+impl ResolutionPreset {
+    const fn new(width: usize, height: usize, label: &'static str) -> Self {
+        Self {
+            width,
+            height,
+            label,
+        }
+    }
+
+    const fn square(size: usize, label: &'static str) -> Self {
+        Self::new(size, size, label)
+    }
+}
+
+impl std::fmt::Display for ResolutionPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label)
+    }
+}
+
+fn parse_map_dim(text: &str, name: &str) -> Result<usize, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{name} is empty"));
+    }
+    match trimmed.parse::<usize>() {
+        Ok(n) if (MIN_MAP_SIZE..=MAX_MAP_SIZE).contains(&n) => Ok(n),
+        Ok(_) | Err(_) => Err(format!(
+            "{name} must be an integer {MIN_MAP_SIZE}..={MAX_MAP_SIZE}"
         )),
     }
 }
@@ -112,6 +174,10 @@ struct App {
     refresh_hz: u32,
     /// Text field for a custom refresh-rate value.
     refresh_hz_text: String,
+    /// Text field for a custom canvas width.
+    map_width_text: String,
+    /// Text field for a custom canvas height.
+    map_height_text: String,
     /// Max simulation rounds to run each tick at speed `1.0`.
     max_itrs: u64,
     share_texts: Vec<String>,
@@ -145,6 +211,9 @@ enum Message {
     SpeedChanged(f32),
     RefreshPreset(u32),
     RefreshHzText(String),
+    ResolutionPreset(usize, usize),
+    MapWidthText(String),
+    MapHeightText(String),
     MaxItrsChanged(f32),
     Random,
     Restart,
@@ -181,7 +250,7 @@ impl App {
         let share_texts = vec![program.machine_encoding(0)];
         let palette = Palette::classic();
         let pixels = rgba_from_map(&program.map, &palette.colors);
-        let frame = Handle::from_rgba(MAP_WIDTH as u32, MAP_HEIGHT as u32, pixels.clone());
+        let frame = Handle::from_rgba(program.width as u32, program.height as u32, pixels.clone());
 
         (
             Self {
@@ -191,6 +260,8 @@ impl App {
                 speed: 1.0,
                 refresh_hz: DEFAULT_REFRESH_HZ,
                 refresh_hz_text: DEFAULT_REFRESH_HZ.to_string(),
+                map_width_text: DEFAULT_MAP_WIDTH.to_string(),
+                map_height_text: DEFAULT_MAP_HEIGHT.to_string(),
                 max_itrs: DEFAULT_MAX_ITRS,
                 share_texts,
                 status: String::new(),
@@ -239,6 +310,7 @@ impl App {
         self.program = program;
         self.num_states = self.program.num_states;
         self.num_symbols = self.program.num_symbols;
+        self.sync_resolution_text();
         self.palette.resolve(self.num_symbols);
         self.selected_machine = None;
         self.sync_share_texts();
@@ -327,6 +399,20 @@ impl App {
                         self.status = e;
                     }
                 }
+                Task::none()
+            }
+            Message::ResolutionPreset(width, height) => {
+                self.apply_resolution(width, height);
+                Task::none()
+            }
+            Message::MapWidthText(text) => {
+                self.map_width_text = text;
+                self.try_apply_custom_resolution();
+                Task::none()
+            }
+            Message::MapHeightText(text) => {
+                self.map_height_text = text;
+                self.try_apply_custom_resolution();
                 Task::none()
             }
             Message::MaxItrsChanged(value) => {
@@ -608,9 +694,59 @@ impl App {
         self.refresh_frame();
     }
 
+    fn sync_resolution_text(&mut self) {
+        self.map_width_text = self.program.width.to_string();
+        self.map_height_text = self.program.height.to_string();
+    }
+
+    fn apply_resolution(&mut self, width: usize, height: usize) {
+        if width == self.program.width && height == self.program.height {
+            self.sync_resolution_text();
+            self.status.clear();
+            return;
+        }
+        match self.program.set_size(width, height) {
+            Ok(()) => {
+                self.sync_resolution_text();
+                self.sync_share_texts();
+                self.status = format!("Resolution: {width} × {height}; drawing reset");
+                self.refresh_frame();
+            }
+            Err(e) => {
+                self.status = e;
+            }
+        }
+    }
+
+    fn try_apply_custom_resolution(&mut self) {
+        match (
+            parse_map_dim(&self.map_width_text, "Width"),
+            parse_map_dim(&self.map_height_text, "Height"),
+        ) {
+            (Ok(width), Ok(height)) => {
+                if width == self.program.width && height == self.program.height {
+                    self.status.clear();
+                    return;
+                }
+                self.apply_resolution(width, height);
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                self.status = e;
+            }
+        }
+    }
+
     fn refresh_frame(&mut self) {
+        let needed = self.program.map.len() * 4;
+        if self.pixels.len() != needed {
+            self.pixels.resize(needed, 0);
+        }
         fill_rgba_from_map(&self.program.map, &mut self.pixels, &self.palette.colors);
-        self.frame = Handle::from_rgba(MAP_WIDTH as u32, MAP_HEIGHT as u32, self.pixels.clone());
+        self.frame = Handle::from_rgba(
+            self.program.width as u32,
+            self.program.height as u32,
+            self.pixels.clone(),
+        );
     }
 
     fn adjust_selection_after_remove(&mut self, removed: usize) {
@@ -624,12 +760,7 @@ impl App {
     }
 
     fn drawing_canvas(&self) -> Element<'_, Message> {
-        let framed = container(
-            image(self.frame.clone())
-                .expand(true)
-                .content_fit(ContentFit::Contain)
-                .filter_method(FilterMethod::Nearest),
-        )
+        let framed = container(simulation_frame(self.frame.clone()))
         .padding(0)
         .style(|_theme: &Theme| container::Style {
             background: Some(Background::Color(Color::BLACK)),
@@ -687,6 +818,34 @@ impl App {
                     .width(36)
                     .align_x(Alignment::Center),
                 button("+").on_press(Message::IncSymbols),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                text("Resolution:").width(110),
+                pick_list(
+                    RESOLUTION_PRESETS,
+                    RESOLUTION_PRESETS.iter().copied().find(|preset| {
+                        preset.width == self.program.width && preset.height == self.program.height
+                    }),
+                    |preset: ResolutionPreset| {
+                        Message::ResolutionPreset(preset.width, preset.height)
+                    },
+                )
+                .placeholder("Custom")
+                .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                Space::new().width(110),
+                text_input("W", &self.map_width_text)
+                    .on_input(Message::MapWidthText)
+                    .width(Length::Fill),
+                text("×").width(16),
+                text_input("H", &self.map_height_text)
+                    .on_input(Message::MapHeightText)
+                    .width(Length::Fill),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -770,7 +929,10 @@ impl App {
                          regenerate every machine, or Randomise on a machine to regenerate \
                          only that one. Add machine to add another (this resets the \
                          drawing), or Restart to clear the grid. Use Presets to store or \
-                         load the starting setup of all machines. Each machine has its own \
+                         load the starting setup of all machines. Resolution sets the \
+                         drawing grid (default 512 × 512); choose a preset or type a \
+                         custom width and height (64–4096). Changing resolution clears \
+                         the drawing. Each machine has its own \
                          Speed slider (0 is the default rate; frequency is 10^(speed/10), \
                          so +10 is ten times more often and −10 ten times less). \
                          Refresh rate sets how often the simulation ticks (default 60 Hz); \
@@ -904,8 +1066,8 @@ impl App {
                 ]
                 .align_y(Alignment::Center),
                 text(
-                    "Store the starting setup of all machines (rules, starts, speeds). \
-                     Loading replaces the current machines and clears the drawing."
+                    "Store the starting setup of all machines (rules, starts, speeds, \
+                     canvas size). Loading replaces the current machines and clears the drawing."
                 )
                 .size(13),
                 row![
@@ -1117,5 +1279,18 @@ mod tests {
         assert_eq!(parse_refresh_hz("300").unwrap(), MAX_REFRESH_HZ);
         assert!(parse_refresh_hz("").is_err());
         assert!(parse_refresh_hz("abc").is_err());
+    }
+
+    #[test]
+    fn parse_map_dim_accepts_in_range_and_rejects_invalid() {
+        assert_eq!(parse_map_dim("512", "Width").unwrap(), 512);
+        assert_eq!(parse_map_dim(" 1920 ", "Width").unwrap(), 1920);
+        assert_eq!(parse_map_dim("64", "Height").unwrap(), MIN_MAP_SIZE);
+        assert_eq!(parse_map_dim("4096", "Height").unwrap(), MAX_MAP_SIZE);
+        assert!(parse_map_dim("", "Width").is_err());
+        assert!(parse_map_dim("abc", "Width").is_err());
+        assert!(parse_map_dim("63", "Width").is_err());
+        assert!(parse_map_dim("4097", "Height").is_err());
+        assert!(parse_map_dim("0", "Width").is_err());
     }
 }

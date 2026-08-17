@@ -7,8 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::machine::{
-    Machine, MAP_HEIGHT, MAP_WIDTH, MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED,
-    MIN_STATES, MIN_SYMBOLS,
+    validate_map_size, wrap_pos, Machine, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH,
+    MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
 };
 use crate::program::Program;
 
@@ -35,6 +35,10 @@ pub struct Preset {
     pub saved_at: u64,
     pub num_states: usize,
     pub num_symbols: usize,
+    #[serde(default = "default_map_width")]
+    pub map_width: usize,
+    #[serde(default = "default_map_height")]
+    pub map_height: usize,
     pub machines: Vec<PresetMachine>,
 }
 
@@ -86,6 +90,8 @@ impl Program {
             saved_at: 0,
             num_states: self.num_states,
             num_symbols: self.num_symbols,
+            map_width: self.width,
+            map_height: self.height,
             machines: self
                 .machines
                 .iter()
@@ -103,12 +109,14 @@ impl Program {
     pub fn from_preset(preset: &Preset) -> Result<Self, String> {
         validate_preset(preset)?;
 
+        let width = preset.map_width;
+        let height = preset.map_height;
         let machines: Vec<Machine> = preset
             .machines
             .iter()
             .map(|m| {
-                let start_x = wrap_pos(m.start_x, MAP_WIDTH as i32);
-                let start_y = wrap_pos(m.start_y, MAP_HEIGHT as i32);
+                let start_x = wrap_pos(m.start_x, width as i32);
+                let start_y = wrap_pos(m.start_y, height as i32);
                 let speed = m.speed.clamp(MIN_MACHINE_SPEED, MAX_MACHINE_SPEED);
                 Machine {
                     table: m.table.clone(),
@@ -127,7 +135,9 @@ impl Program {
         let mut prog = Self {
             num_states: preset.num_states,
             num_symbols: preset.num_symbols,
-            map: vec![0; crate::machine::MAP_LEN],
+            width,
+            height,
+            map: vec![0; width * height],
             machines,
             itr_count: 0,
         };
@@ -158,6 +168,7 @@ fn validate_preset(preset: &Preset) -> Result<(), String> {
             preset.num_symbols
         ));
     }
+    validate_map_size(preset.map_width, preset.map_height)?;
     if preset.machines.is_empty() {
         return Err("preset has no machines".into());
     }
@@ -179,8 +190,12 @@ fn validate_preset(preset: &Preset) -> Result<(), String> {
     Ok(())
 }
 
-fn wrap_pos(v: i32, dim: i32) -> i32 {
-    v.rem_euclid(dim)
+fn default_map_width() -> usize {
+    DEFAULT_MAP_WIDTH
+}
+
+fn default_map_height() -> usize {
+    DEFAULT_MAP_HEIGHT
 }
 
 /// Sanitize a display name into a safe filename stem (`[A-Za-z0-9._-]+`).
@@ -403,7 +418,9 @@ mod tests {
         let mut p = Program {
             num_states: 1,
             num_symbols: 2,
-            map: vec![0; crate::machine::MAP_LEN],
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![m0.clone(), m1.clone()],
             itr_count: 0,
         };
@@ -419,6 +436,8 @@ mod tests {
         let q = Program::from_preset(&preset).unwrap();
         assert_eq!(q.num_states, 1);
         assert_eq!(q.num_symbols, 2);
+        assert_eq!(q.width, DEFAULT_MAP_WIDTH);
+        assert_eq!(q.height, DEFAULT_MAP_HEIGHT);
         assert_eq!(q.machines.len(), 2);
         assert_eq!(q.machines[0].table, m0.table);
         assert_eq!(q.machines[1].table, m1.table);
@@ -440,6 +459,8 @@ mod tests {
             saved_at: 0,
             num_states: 1,
             num_symbols: 2,
+            map_width: DEFAULT_MAP_WIDTH,
+            map_height: DEFAULT_MAP_HEIGHT,
             machines: vec![PresetMachine {
                 start_x: 0,
                 start_y: 0,
@@ -584,7 +605,45 @@ mod tests {
         }"#;
         let preset: Preset = serde_json::from_str(json).unwrap();
         assert_eq!(preset.saved_at, 0);
+        assert_eq!(preset.map_width, DEFAULT_MAP_WIDTH);
+        assert_eq!(preset.map_height, DEFAULT_MAP_HEIGHT);
         assert!(validate_preset(&preset).is_ok());
+    }
+
+    #[test]
+    fn custom_canvas_size_roundtrips() {
+        let mut p = Program::new_random(2, 2);
+        p.set_size(1920, 1080).unwrap();
+        let preset = p.to_preset("wide").unwrap();
+        assert_eq!(preset.map_width, 1920);
+        assert_eq!(preset.map_height, 1080);
+        let q = Program::from_preset(&preset).unwrap();
+        assert_eq!(q.width, 1920);
+        assert_eq!(q.height, 1080);
+        assert_eq!(q.map.len(), 1920 * 1080);
+    }
+
+    #[test]
+    fn reject_invalid_map_size() {
+        let mut bad = Preset {
+            version: PRESET_VERSION,
+            name: "ok".into(),
+            saved_at: 0,
+            num_states: 1,
+            num_symbols: 2,
+            map_width: 10,
+            map_height: 512,
+            machines: vec![PresetMachine {
+                start_x: 0,
+                start_y: 0,
+                speed: 0.0,
+                table: vec![0, 1, 0, 0, 1, 0],
+            }],
+        };
+        assert!(validate_preset(&bad).is_err());
+        bad.map_width = 512;
+        bad.map_height = 9000;
+        assert!(validate_preset(&bad).is_err());
     }
 
     #[test]
