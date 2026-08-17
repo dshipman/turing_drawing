@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use iced::keyboard::key;
 use iced::widget::{
-    button, center, column, container, image, mouse_area, opaque, row, scrollable, slider, stack,
-    text, text_input, Space,
+    button, center, column, container, image, mouse_area, opaque, pick_list, row, scrollable,
+    slider, stack, text, text_input, Space,
 };
 use iced::widget::image::{FilterMethod, Handle};
 use iced::{
@@ -19,7 +19,7 @@ use iced::{
 
 use color_picker::{ColorPicker, ControlsMessage, GradientEndpoint};
 use palette::{Palette, PaletteKind, Rgb};
-use preset::PresetInfo;
+use preset::{PresetInfo, PresetSort};
 use program::{
     step_rate, Program, MAP_HEIGHT, MAP_WIDTH, MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS,
     MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
@@ -86,6 +86,8 @@ struct App {
     preset_name: String,
     /// Cached list of presets on disk (refreshed when the browser opens or changes).
     preset_list: Vec<PresetInfo>,
+    /// Order of the preset browser list.
+    preset_sort: PresetSort,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +122,7 @@ enum Message {
     StorePreset,
     LoadPreset(String),
     DeletePreset(String),
+    PresetSortChanged(PresetSort),
 }
 
 impl App {
@@ -149,6 +152,7 @@ impl App {
                 preset_browser_open: false,
                 preset_name: String::new(),
                 preset_list: Vec::new(),
+                preset_sort: PresetSort::DateSaved,
             },
             Task::none(),
         )
@@ -169,7 +173,10 @@ impl App {
 
     fn refresh_preset_list(&mut self) {
         match preset::list_presets() {
-            Ok(list) => self.preset_list = list,
+            Ok(mut list) => {
+                preset::sort_preset_infos(&mut list, self.preset_sort);
+                self.preset_list = list;
+            }
             Err(e) => {
                 self.preset_list.clear();
                 self.status = format!("Could not list presets: {e}");
@@ -494,6 +501,11 @@ impl App {
                     Task::none()
                 }
             },
+            Message::PresetSortChanged(sort) => {
+                self.preset_sort = sort;
+                preset::sort_preset_infos(&mut self.preset_list, sort);
+                Task::none()
+            },
         }
     }
 
@@ -745,8 +757,11 @@ impl App {
                         column![
                             text(&info.name).size(14),
                             text(format!(
-                                "{} machine(s), {} states × {} symbols",
-                                info.num_machines, info.num_states, info.num_symbols
+                                "{} machine(s), {} states × {} symbols · {}",
+                                info.num_machines,
+                                info.num_states,
+                                info.num_symbols,
+                                preset::format_saved_at(info.saved_at)
                             ))
                             .size(12),
                         ]
@@ -782,7 +797,18 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
-                text("Saved presets:").size(14),
+                row![
+                    text("Saved presets:").size(14).width(Length::Fill),
+                    text("Sort:").size(13),
+                    pick_list(
+                        PresetSort::ALL,
+                        Some(self.preset_sort),
+                        Message::PresetSortChanged,
+                    )
+                    .width(140),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
                 scrollable(list).height(Length::Fixed(280.0)).width(Length::Fill),
             ]
             .spacing(10),

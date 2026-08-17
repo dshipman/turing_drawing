@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,9 +30,33 @@ pub struct PresetMachine {
 pub struct Preset {
     pub version: u32,
     pub name: String,
+    /// Unix timestamp (seconds) of the last Store. Missing in older files.
+    #[serde(default)]
+    pub saved_at: u64,
     pub num_states: usize,
     pub num_symbols: usize,
     pub machines: Vec<PresetMachine>,
+}
+
+/// How the preset browser orders its list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PresetSort {
+    Name,
+    #[default]
+    DateSaved,
+}
+
+impl PresetSort {
+    pub const ALL: [PresetSort; 2] = [Self::Name, Self::DateSaved];
+}
+
+impl std::fmt::Display for PresetSort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Name => "Name",
+            Self::DateSaved => "Date saved",
+        })
+    }
 }
 
 /// Summary row for the preset browser list.
@@ -41,6 +66,7 @@ pub struct PresetInfo {
     pub num_machines: usize,
     pub num_states: usize,
     pub num_symbols: usize,
+    pub saved_at: u64,
 }
 
 impl Program {
@@ -57,6 +83,7 @@ impl Program {
         Ok(Preset {
             version: PRESET_VERSION,
             name: name.to_string(),
+            saved_at: 0,
             num_states: self.num_states,
             num_symbols: self.num_symbols,
             machines: self
@@ -195,12 +222,55 @@ fn preset_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{stem}.json")))
 }
 
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn file_mtime_secs(path: &Path) -> Option<u64> {
+    let meta = fs::metadata(path).ok()?;
+    let modified = meta.modified().ok()?;
+    Some(modified.duration_since(UNIX_EPOCH).ok()?.as_secs())
+}
+
+/// Format a unix timestamp as `YYYY-MM-DD HH:MM UTC` for the browser list.
+pub fn format_saved_at(secs: u64) -> String {
+    if secs == 0 {
+        return "unknown date".into();
+    }
+    let (year, month, day, hour, minute) = utc_parts(secs);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02} UTC")
+}
+
+/// Civil UTC date/time from unix seconds (Howard Hinnant's algorithm).
+fn utc_parts(secs: u64) -> (i32, u32, u32, u32, u32) {
+    let secs_of_day = (secs % 86_400) as u32;
+    let hour = secs_of_day / 3_600;
+    let minute = (secs_of_day % 3_600) / 60;
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if m <= 2 { y + 1 } else { y };
+    (year as i32, m, d, hour, minute)
+}
+
 /// Write (or overwrite) a preset to disk. Returns the display name stored.
+/// Stamps `saved_at` with the current time so date-saved sort stays accurate.
 pub fn save_preset(preset: &Preset) -> Result<String, String> {
     validate_preset(preset)?;
     let dir = ensure_presets_dir()?;
     let path = preset_path(&dir, &preset.name)?;
-    let json = serde_json::to_string_pretty(preset)
+    let mut to_write = preset.clone();
+    to_write.saved_at = unix_now();
+    let json = serde_json::to_string_pretty(&to_write)
         .map_err(|e| format!("failed to serialize preset: {e}"))?;
     fs::write(&path, json).map_err(|e| format!("failed to write preset: {e}"))?;
     Ok(preset.name.clone())
@@ -228,7 +298,8 @@ pub fn delete_preset(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// List saved presets (sorted by name). Skips unreadable or invalid files.
+/// List saved presets (unsorted). Skips unreadable or invalid files.
+/// Older files without `saved_at` fall back to the file's modification time.
 pub fn list_presets() -> Result<Vec<PresetInfo>, String> {
     let dir = match presets_dir() {
         Ok(d) => d,
@@ -256,15 +327,36 @@ pub fn list_presets() -> Result<Vec<PresetInfo>, String> {
         if validate_preset(&preset).is_err() {
             continue;
         }
+        let saved_at = if preset.saved_at > 0 {
+            preset.saved_at
+        } else {
+            file_mtime_secs(&path).unwrap_or(0)
+        };
         infos.push(PresetInfo {
             name: preset.name,
             num_machines: preset.machines.len(),
             num_states: preset.num_states,
             num_symbols: preset.num_symbols,
+            saved_at,
         });
     }
-    infos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(infos)
+}
+
+/// Sort a preset list in place: name A–Z, or date saved newest first.
+pub fn sort_preset_infos(infos: &mut [PresetInfo], sort: PresetSort) {
+    match sort {
+        PresetSort::Name => {
+            infos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        }
+        PresetSort::DateSaved => {
+            infos.sort_by(|a, b| {
+                b.saved_at
+                    .cmp(&a.saved_at)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -344,6 +436,7 @@ mod tests {
         let good = Preset {
             version: PRESET_VERSION,
             name: "ok".into(),
+            saved_at: 0,
             num_states: 1,
             num_symbols: 2,
             machines: vec![PresetMachine {
@@ -406,6 +499,7 @@ mod tests {
 
         let loaded = load_preset(&unique).unwrap();
         assert_eq!(loaded.machines[0].table, preset.machines[0].table);
+        assert!(loaded.saved_at > 0);
 
         // Overwrite with a different table length would fail validation; change speed.
         preset.machines[0].speed = 5.0;
@@ -453,5 +547,70 @@ mod tests {
         assert_eq!(loaded.num_symbols, 3);
 
         delete_preset(&name_under).unwrap();
+    }
+
+    fn info(name: &str, saved_at: u64) -> PresetInfo {
+        PresetInfo {
+            name: name.into(),
+            num_machines: 1,
+            num_states: 2,
+            num_symbols: 2,
+            saved_at,
+        }
+    }
+
+    #[test]
+    fn sort_by_name_and_date() {
+        let mut infos = vec![info("zeta", 10), info("Alpha", 30), info("beta", 20)];
+        sort_preset_infos(&mut infos, PresetSort::Name);
+        let names: Vec<_> = infos.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "beta", "zeta"]);
+
+        sort_preset_infos(&mut infos, PresetSort::DateSaved);
+        let names: Vec<_> = infos.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Alpha", "beta", "zeta"]);
+
+        let mut ties = vec![info("b", 5), info("a", 5), info("c", 9)];
+        sort_preset_infos(&mut ties, PresetSort::DateSaved);
+        let names: Vec<_> = ties.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["c", "a", "b"]);
+    }
+
+    #[test]
+    fn old_json_without_saved_at_loads() {
+        let json = r#"{
+            "version": 1,
+            "name": "legacy",
+            "num_states": 1,
+            "num_symbols": 2,
+            "machines": [{"start_x": 0, "start_y": 0, "speed": 0.0, "table": [0, 1, 0, 0, 1, 0]}]
+        }"#;
+        let preset: Preset = serde_json::from_str(json).unwrap();
+        assert_eq!(preset.saved_at, 0);
+        assert!(validate_preset(&preset).is_ok());
+    }
+
+    #[test]
+    fn format_saved_at_is_utc() {
+        assert_eq!(format_saved_at(0), "unknown date");
+        // 2026-08-17 05:55:00 UTC
+        assert_eq!(format_saved_at(1_786_946_100), "2026-08-17 05:55 UTC");
+    }
+
+    #[test]
+    fn save_stamps_saved_at() {
+        let _guard = FS_LOCK.lock().unwrap();
+        let Ok(_) = ensure_presets_dir() else {
+            return;
+        };
+        let unique = format!("stamp_preset_{}", std::process::id());
+        let _ = delete_preset(&unique);
+        let p = Program::new_random(2, 2);
+        let preset = p.to_preset(&unique).unwrap();
+        assert_eq!(preset.saved_at, 0);
+        save_preset(&preset).unwrap();
+        let loaded = load_preset(&unique).unwrap();
+        assert!(loaded.saved_at > 0);
+        delete_preset(&unique).unwrap();
     }
 }
