@@ -7,11 +7,11 @@ mod program;
 use std::time::{Duration, Instant};
 
 use iced::keyboard::key;
+use iced::widget::image::{FilterMethod, Handle};
 use iced::widget::{
     button, center, column, container, image, mouse_area, opaque, pick_list, row, scrollable,
     slider, stack, text, text_input, Space,
 };
-use iced::widget::image::{FilterMethod, Handle};
 use iced::{
     clipboard, event, keyboard, time, window, Alignment, Background, Border, Color, ContentFit,
     Element, Event, Length, Size, Subscription, Task, Theme,
@@ -25,9 +25,48 @@ use program::{
     MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
 };
 
-const UPDATE_TIME: Duration = Duration::from_millis(40);
-const UPDATE_ITRS: u64 = 350_000;
+const DEFAULT_REFRESH_HZ: u32 = 60;
+const MIN_REFRESH_HZ: u32 = 1;
+const MAX_REFRESH_HZ: u32 = 240;
+const REFRESH_PRESETS: [RefreshPreset; 6] = [
+    RefreshPreset(30),
+    RefreshPreset(60),
+    RefreshPreset(120),
+    RefreshPreset(144),
+    RefreshPreset(165),
+    RefreshPreset(240),
+];
+const DEFAULT_MAX_ITRS: u64 = 350_000;
+const MIN_MAX_ITRS: u64 = 1_000;
+const MAX_MAX_ITRS: u64 = 2_000_000;
 const CHUNK: usize = 5_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct RefreshPreset(u32);
+
+impl std::fmt::Display for RefreshPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} Hz", self.0)
+    }
+}
+
+fn frame_period(hz: u32) -> Duration {
+    let hz = hz.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ);
+    Duration::from_secs_f64(1.0 / f64::from(hz))
+}
+
+fn parse_refresh_hz(text: &str) -> Result<u32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("Refresh rate is empty".into());
+    }
+    match trimmed.parse::<u32>() {
+        Ok(hz) => Ok(hz.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ)),
+        Err(_) => Err(format!(
+            "Refresh rate must be an integer {MIN_REFRESH_HZ}..={MAX_REFRESH_HZ}"
+        )),
+    }
+}
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
@@ -67,8 +106,14 @@ struct App {
     program: Program,
     num_states: usize,
     num_symbols: usize,
-    /// Fraction of `UPDATE_ITRS` to run each tick (`0.0` = paused, `1.0` = max).
+    /// Fraction of `max_itrs` to run each tick (`0.0` = paused, `1.0` = max).
     speed: f32,
+    /// Target simulation ticks per second.
+    refresh_hz: u32,
+    /// Text field for a custom refresh-rate value.
+    refresh_hz_text: String,
+    /// Max simulation rounds to run each tick at speed `1.0`.
+    max_itrs: u64,
     share_texts: Vec<String>,
     status: String,
     /// Cached RGBA frame; rebuilt when the map changes.
@@ -98,6 +143,9 @@ enum Message {
     IncSymbols,
     DecSymbols,
     SpeedChanged(f32),
+    RefreshPreset(u32),
+    RefreshHzText(String),
+    MaxItrsChanged(f32),
     Random,
     Restart,
     AddMachine,
@@ -141,6 +189,9 @@ impl App {
                 num_states,
                 num_symbols,
                 speed: 1.0,
+                refresh_hz: DEFAULT_REFRESH_HZ,
+                refresh_hz_text: DEFAULT_REFRESH_HZ.to_string(),
+                max_itrs: DEFAULT_MAX_ITRS,
                 share_texts,
                 status: String::new(),
                 pixels,
@@ -160,7 +211,7 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
-            time::every(UPDATE_TIME).map(|_| Message::Tick),
+            time::every(frame_period(self.refresh_hz)).map(|_| Message::Tick),
             event::listen_with(on_event),
         ])
     }
@@ -258,6 +309,31 @@ impl App {
                 self.speed = speed.clamp(0.0, 1.0);
                 Task::none()
             }
+            Message::RefreshPreset(hz) => {
+                let hz = hz.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ);
+                self.refresh_hz = hz;
+                self.refresh_hz_text = hz.to_string();
+                self.status.clear();
+                Task::none()
+            }
+            Message::RefreshHzText(text) => {
+                self.refresh_hz_text = text;
+                match parse_refresh_hz(&self.refresh_hz_text) {
+                    Ok(hz) => {
+                        self.refresh_hz = hz;
+                        self.status.clear();
+                    }
+                    Err(e) => {
+                        self.status = e;
+                    }
+                }
+                Task::none()
+            }
+            Message::MaxItrsChanged(value) => {
+                let value = value.round() as u64;
+                self.max_itrs = value.clamp(MIN_MAX_ITRS, MAX_MAX_ITRS);
+                Task::none()
+            }
             Message::Random => {
                 self.program.randomize(self.num_states, self.num_symbols);
                 self.sync_share_texts();
@@ -326,14 +402,15 @@ impl App {
                 self.selected_machine = None;
                 Task::none()
             }
-            Message::MachineSpeedChanged(i, speed) => match self.program.set_machine_speed(i, speed)
-            {
-                Ok(()) => Task::none(),
-                Err(e) => {
-                    self.status = e;
-                    Task::none()
+            Message::MachineSpeedChanged(i, speed) => {
+                match self.program.set_machine_speed(i, speed) {
+                    Ok(()) => Task::none(),
+                    Err(e) => {
+                        self.status = e;
+                        Task::none()
+                    }
                 }
-            },
+            }
             Message::ShareChanged(i, s) => {
                 if let Some(slot) = self.share_texts.get_mut(i) {
                     *slot = s;
@@ -505,22 +582,23 @@ impl App {
                 self.preset_sort = sort;
                 preset::sort_preset_infos(&mut self.preset_list, sort);
                 Task::none()
-            },
+            }
         }
     }
 
     fn run_frame(&mut self) {
-        let max_itrs = (UPDATE_ITRS as f64 * f64::from(self.speed)) as u64;
+        let max_itrs = (self.max_itrs as f64 * f64::from(self.speed)) as u64;
         if max_itrs == 0 {
             return;
         }
 
         let start = Instant::now();
         let start_itr = self.program.itr_count;
+        let budget = frame_period(self.refresh_hz);
 
         loop {
             let remaining = max_itrs.saturating_sub(self.program.itr_count - start_itr);
-            if remaining == 0 || start.elapsed() >= UPDATE_TIME {
+            if remaining == 0 || start.elapsed() >= budget {
                 break;
             }
             let chunk = CHUNK.min(remaining as usize);
@@ -621,12 +699,48 @@ impl App {
             ]
             .spacing(8)
             .align_y(Alignment::Center),
-            color_picker::palette_controls(&self.palette, &self.color_picker).map(|msg| match msg {
-                ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
-                ControlsMessage::GradientStartChanged(hex) => Message::GradientStartChanged(hex),
-                ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
-                ControlsMessage::Picker(m) => Message::ColorPicker(m),
-            }),
+            row![
+                text("Refresh rate:").width(110),
+                pick_list(
+                    REFRESH_PRESETS,
+                    REFRESH_PRESETS
+                        .iter()
+                        .copied()
+                        .find(|preset| preset.0 == self.refresh_hz),
+                    |preset: RefreshPreset| Message::RefreshPreset(preset.0),
+                )
+                .placeholder("Custom")
+                .width(100),
+                text_input("Hz", &self.refresh_hz_text)
+                    .on_input(Message::RefreshHzText)
+                    .width(Length::Fill),
+                text("Hz").width(24),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            row![
+                text("Max itrs/frame:").width(110),
+                slider(
+                    MIN_MAX_ITRS as f32..=MAX_MAX_ITRS as f32,
+                    self.max_itrs as f32,
+                    Message::MaxItrsChanged,
+                )
+                .step(1_000.0_f32),
+                text(self.max_itrs.to_string())
+                    .width(72)
+                    .align_x(Alignment::Center),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+            color_picker::palette_controls(&self.palette, &self.color_picker).map(
+                |msg| match msg {
+                    ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
+                    ControlsMessage::GradientStartChanged(hex) =>
+                        Message::GradientStartChanged(hex),
+                    ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
+                    ControlsMessage::Picker(m) => Message::ColorPicker(m),
+                }
+            ),
         ]
         .spacing(6)
         .width(380)
@@ -658,7 +772,12 @@ impl App {
                          drawing), or Restart to clear the grid. Use Presets to store or \
                          load the starting setup of all machines. Each machine has its own \
                          Speed slider (0 is the default rate; frequency is 10^(speed/10), \
-                         so +10 is ten times more often and −10 ten times less). Click \
+                         so +10 is ten times more often and −10 ten times less). \
+                         Refresh rate sets how often the simulation ticks (default 60 Hz); \
+                         choose a preset or type a custom Hz. Max itrs/frame is the round \
+                         cap each tick at Speed 1 (default 350000); Speed is a fraction of \
+                         that cap, and work also yields when the frame's time budget is \
+                         spent. Click \
                          a machine for its details \
                          and shareable encoding; original website #hashes load \
                          with start (0,0). \
@@ -809,7 +928,9 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
-                scrollable(list).height(Length::Fixed(280.0)).width(Length::Fill),
+                scrollable(list)
+                    .height(Length::Fixed(280.0))
+                    .width(Length::Fill),
             ]
             .spacing(10),
         )
@@ -917,11 +1038,9 @@ impl App {
 
 fn machine_speed_slider(index: usize, speed: f32) -> Element<'static, Message> {
     row![
-        slider(
-            MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED,
-            speed,
-            move |v| Message::MachineSpeedChanged(index, v),
-        )
+        slider(MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED, speed, move |v| {
+            Message::MachineSpeedChanged(index, v)
+        },)
         .step(0.1_f32),
         text(machine_speed_label(speed))
             .width(88)
@@ -976,5 +1095,27 @@ fn fill_rgba_from_map(map: &[i32], pixels: &mut [u8], colors: &[Rgb; MAX_SYMBOLS
         pixels[o + 1] = c[1];
         pixels[o + 2] = c[2];
         pixels[o + 3] = 255;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_period_is_inverse_of_hz() {
+        assert_eq!(frame_period(60), Duration::from_secs_f64(1.0 / 60.0));
+        assert_eq!(frame_period(0), frame_period(MIN_REFRESH_HZ));
+        assert_eq!(frame_period(1_000), frame_period(MAX_REFRESH_HZ));
+    }
+
+    #[test]
+    fn parse_refresh_hz_clamps_and_rejects_invalid() {
+        assert_eq!(parse_refresh_hz("60").unwrap(), 60);
+        assert_eq!(parse_refresh_hz(" 75 ").unwrap(), 75);
+        assert_eq!(parse_refresh_hz("0").unwrap(), MIN_REFRESH_HZ);
+        assert_eq!(parse_refresh_hz("300").unwrap(), MAX_REFRESH_HZ);
+        assert!(parse_refresh_hz("").is_err());
+        assert!(parse_refresh_hz("abc").is_err());
     }
 }
