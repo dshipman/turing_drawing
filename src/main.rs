@@ -43,6 +43,10 @@ const DEFAULT_MAX_ITRS: u64 = 350_000;
 const MIN_MAX_ITRS: u64 = 1_000;
 const MAX_MAX_ITRS: u64 = 2_000_000;
 const CHUNK: usize = 5_000;
+/// Resume this long after the last resize during a fullscreen transition.
+const MODE_SWITCH_SETTLE: Duration = Duration::from_millis(100);
+/// Fallback cap if no resize events arrive during a mode switch.
+const MODE_SWITCH_PAUSE_MAX: Duration = Duration::from_millis(800);
 const RESOLUTION_PRESETS: [ResolutionPreset; 18] = [
     ResolutionPreset::square(512, "512 × 512"),
     ResolutionPreset::square(1024, "1024 × 1024"),
@@ -203,6 +207,8 @@ struct App {
     canvas_open: bool,
     palette_open: bool,
     simulation_open: bool,
+    /// When set, simulation stays paused until this instant.
+    mode_switch_resume_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,6 +246,8 @@ enum Message {
     LoadShare(usize),
     ToggleDrawingOnly,
     ToggleFullscreen,
+    PauseForModeSwitch,
+    WindowResized,
     Escape,
     PaletteSelected(PaletteKind),
     GradientStartChanged(String),
@@ -291,15 +299,38 @@ impl App {
                 canvas_open: true,
                 palette_open: true,
                 simulation_open: true,
+                mode_switch_resume_at: None,
             },
             Task::none(),
         )
     }
 
+    fn pause_for_mode_switch(&mut self) {
+        self.mode_switch_resume_at = Some(Instant::now() + MODE_SWITCH_PAUSE_MAX);
+    }
+
+    fn note_mode_switch_resize(&mut self) {
+        if self.mode_switch_resume_at.is_some() {
+            self.mode_switch_resume_at = Some(Instant::now() + MODE_SWITCH_SETTLE);
+        }
+    }
+
+    fn mode_switch_paused(&self) -> bool {
+        self.mode_switch_resume_at
+            .is_some_and(|resume_at| Instant::now() < resume_at)
+    }
+
     fn subscription(&self) -> Subscription<Message> {
+        let tick = if self.mode_switch_paused() {
+            time::every(MODE_SWITCH_SETTLE).map(|_| Message::Tick)
+        } else {
+            time::every(frame_period(self.refresh_hz)).map(|_| Message::Tick)
+        };
+
         Subscription::batch([
-            time::every(frame_period(self.refresh_hz)).map(|_| Message::Tick),
+            tick,
             event::listen_with(on_event),
+            window::resize_events().map(|(_id, _size)| Message::WindowResized),
         ])
     }
 
@@ -342,7 +373,10 @@ impl App {
                 } else {
                     window::Mode::Fullscreen
                 };
-                window::set_mode(id, next)
+                Task::batch([
+                    Task::done(Message::PauseForModeSwitch),
+                    window::set_mode(id, next),
+                ])
             })
         })
     }
@@ -351,7 +385,10 @@ impl App {
         window::latest().and_then(|id| {
             window::mode(id).then(move |mode| {
                 if mode == window::Mode::Fullscreen {
-                    window::set_mode(id, window::Mode::Windowed)
+                    Task::batch([
+                        Task::done(Message::PauseForModeSwitch),
+                        window::set_mode(id, window::Mode::Windowed),
+                    ])
                 } else {
                     Task::none()
                 }
@@ -559,7 +596,18 @@ impl App {
                 self.drawing_only = !self.drawing_only;
                 Task::none()
             }
-            Message::ToggleFullscreen => Self::toggle_fullscreen(),
+            Message::ToggleFullscreen => {
+                self.pause_for_mode_switch();
+                Self::toggle_fullscreen()
+            }
+            Message::PauseForModeSwitch => {
+                self.pause_for_mode_switch();
+                Task::none()
+            }
+            Message::WindowResized => {
+                self.note_mode_switch_resize();
+                Task::none()
+            }
             Message::Escape => {
                 if self.preset_browser_open {
                     self.preset_browser_open = false;
@@ -706,6 +754,13 @@ impl App {
     }
 
     fn run_frame(&mut self) {
+        if let Some(resume_at) = self.mode_switch_resume_at {
+            if Instant::now() < resume_at {
+                return;
+            }
+            self.mode_switch_resume_at = None;
+        }
+
         let max_itrs = (self.max_itrs as f64 * f64::from(self.speed)) as u64;
         if max_itrs == 0 {
             return;
