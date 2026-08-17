@@ -309,19 +309,17 @@ pub fn palette_controls<'a>(
     palette: &'a Palette,
     picker: &'a ColorPicker,
 ) -> Element<'a, ControlsMessage> {
-    let mut controls = column![
-        row![
-            text("Palette:").width(110),
-            pick_list(
-                PaletteKind::ALL,
-                Some(palette.kind),
-                ControlsMessage::KindSelected,
-            )
-            .width(Length::Fill),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+    let mut controls = column![row![
+        text("Palette:").width(110),
+        pick_list(
+            PaletteKind::ALL,
+            Some(palette.kind),
+            ControlsMessage::KindSelected,
+        )
+        .width(Length::Fill),
     ]
+    .spacing(8)
+    .align_y(Alignment::Center),]
     .spacing(6);
 
     let mut swatches = row![].spacing(4);

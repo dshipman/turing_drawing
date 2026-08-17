@@ -351,8 +351,16 @@ mod tests {
     fn interleaved_second_machine_sees_first_write() {
         // Both start at (0,0). Machine 0 writes 1 and moves. Machine 1 writes 2
         // only when it reads symbol 1 — so map[0] == 2 means it saw the write.
-        let m0 = fixed_machine(vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 0, 0);
-        let m1 = fixed_machine(vec![0, 1, ACTION_LEFT, 0, 2, ACTION_RIGHT, 0, 2, ACTION_RIGHT], 0, 0);
+        let m0 = fixed_machine(
+            vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT],
+            0,
+            0,
+        );
+        let m1 = fixed_machine(
+            vec![0, 1, ACTION_LEFT, 0, 2, ACTION_RIGHT, 0, 2, ACTION_RIGHT],
+            0,
+            0,
+        );
         let mut p = Program {
             num_states: 1,
             num_symbols: 3,
@@ -454,10 +462,7 @@ mod tests {
         assert_eq!(p.machines[0].x_pos, 100);
         assert_eq!(p.machines[1].x_pos, 1);
         assert_eq!(p.machines[2].x_pos, 10);
-        assert_eq!(
-            p.machines[3].x_pos,
-            (step_rate(5.0) * 10.0).floor() as i32
-        );
+        assert_eq!(p.machines[3].x_pos, (step_rate(5.0) * 10.0).floor() as i32);
     }
 
     #[test]

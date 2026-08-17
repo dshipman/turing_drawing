@@ -207,7 +207,8 @@ pub fn sanitize_filename(name: &str) -> Result<String, String> {
 
 /// Directory that holds preset JSON files.
 pub fn presets_dir() -> Result<PathBuf, String> {
-    let base = dirs::data_dir().ok_or_else(|| "could not resolve app data directory".to_string())?;
+    let base =
+        dirs::data_dir().ok_or_else(|| "could not resolve app data directory".to_string())?;
     Ok(base.join(APP_DIR).join(PRESETS_SUBDIR))
 }
 
@@ -464,11 +465,7 @@ mod tests {
         bad.machines.clear();
         assert!(validate_preset(&bad).is_err());
 
-        assert!(Program::to_preset(
-            &Program::new_random(2, 2),
-            "   "
-        )
-        .is_err());
+        assert!(Program::to_preset(&Program::new_random(2, 2), "   ").is_err());
     }
 
     #[test]

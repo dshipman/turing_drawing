@@ -178,11 +178,7 @@ impl Palette {
     }
 
     /// Update gradient end from a hex string. Returns an error message on invalid input.
-    pub fn set_gradient_end_hex(
-        &mut self,
-        hex: String,
-        num_symbols: usize,
-    ) -> Result<(), String> {
+    pub fn set_gradient_end_hex(&mut self, hex: String, num_symbols: usize) -> Result<(), String> {
         self.gradient_end_hex = hex;
         match parse_hex_rgb(&self.gradient_end_hex) {
             Ok(rgb) => {
@@ -228,12 +224,9 @@ pub fn parse_hex_rgb(s: &str) -> Result<Rgb, String> {
     if hex.len() != 6 {
         return Err(format!("expected #RRGGBB, got {s:?}"));
     }
-    let r = u8::from_str_radix(&hex[0..2], 16)
-        .map_err(|_| format!("invalid hex colour {s:?}"))?;
-    let g = u8::from_str_radix(&hex[2..4], 16)
-        .map_err(|_| format!("invalid hex colour {s:?}"))?;
-    let b = u8::from_str_radix(&hex[4..6], 16)
-        .map_err(|_| format!("invalid hex colour {s:?}"))?;
+    let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| format!("invalid hex colour {s:?}"))?;
+    let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| format!("invalid hex colour {s:?}"))?;
+    let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| format!("invalid hex colour {s:?}"))?;
     Ok([r, g, b])
 }
 
