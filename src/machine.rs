@@ -4,6 +4,7 @@
 //! encoding match https://github.com/maximecb/Turing-Drawings, with an optional
 //! start-position prefix for this port.
 
+use rand::seq::SliceRandom;
 use rand::Rng;
 
 pub const DEFAULT_MAP_WIDTH: usize = 512;
@@ -26,12 +27,22 @@ pub const MAX_SYMBOLS: usize = 8;
 pub const MIN_MACHINE_SPEED: f32 = -10.0;
 pub const MAX_MACHINE_SPEED: f32 = 10.0;
 
+/// Shared mutate slider: fraction of transition-table rules to re-randomize.
+pub const MIN_MUTATE_PERCENT: u8 = 1;
+pub const MAX_MUTATE_PERCENT: u8 = 100;
+pub const DEFAULT_MUTATE_PERCENT: u8 = 10;
+
 /// A decoded share string: dimensions plus the machine they describe.
 #[derive(Debug, Clone)]
 pub struct ParsedMachine {
     pub num_states: usize,
     pub num_symbols: usize,
     pub machine: Machine,
+}
+
+/// Default label for a machine slot (`"Machine 1"` at index 0).
+pub fn default_machine_name(index: usize) -> String {
+    format!("Machine {}", index + 1)
 }
 
 /// Transition: (next_state, write_symbol, action)
@@ -48,6 +59,8 @@ pub struct Machine {
     pub speed: f32,
     /// When false, the machine does not step during simulation.
     pub active: bool,
+    /// User-facing label. Empty falls back to [`default_machine_name`].
+    pub name: String,
     /// Scheduling rounds spent at the current `speed` (for fractional rates).
     pub(crate) rounds_at_speed: u64,
     /// Whole steps already taken during `rounds_at_speed`.
@@ -65,10 +78,7 @@ impl Machine {
 
         for st in 0..num_states {
             for sy in 0..num_symbols {
-                let next_st = rng.random_range(0..num_states) as i32;
-                // Never write symbol 0 (red = untouched), matching the original
-                let write_sy = rng.random_range(1..num_symbols) as i32;
-                let action = rng.random_range(0..NUM_ACTIONS);
+                let (next_st, write_sy, action) = random_trans(&mut rng, num_states, num_symbols);
                 set_trans_raw(&mut table, num_states, st, sy, next_st, write_sy, action);
             }
         }
@@ -85,8 +95,20 @@ impl Machine {
             start_y,
             speed: 0.0,
             active: true,
+            name: String::new(),
             rounds_at_speed: 0,
             steps_at_speed: 0,
+        }
+    }
+
+    /// Label shown in the machine list and inspector. Empty names fall back to
+    /// [`default_machine_name`].
+    pub fn display_name(&self, index: usize) -> String {
+        let trimmed = self.name.trim();
+        if trimmed.is_empty() {
+            default_machine_name(index)
+        } else {
+            trimmed.to_string()
         }
     }
 
@@ -122,6 +144,35 @@ impl Machine {
         self.y_pos = self.start_y;
         self.rounds_at_speed = 0;
         self.steps_at_speed = 0;
+    }
+
+    /// Re-randomize `percent` of `(state, symbol)` rules. Leaves start position,
+    /// head, state, speed, name, and active unchanged.
+    pub fn mutate_table(&mut self, num_states: usize, num_symbols: usize, percent: u8) {
+        let n_rules = num_states * num_symbols;
+        debug_assert_eq!(self.table.len(), n_rules * 3);
+        let count = mutation_count(n_rules, percent);
+        if count == 0 {
+            return;
+        }
+
+        let mut rng = rand::rng();
+        let mut indices: Vec<usize> = (0..n_rules).collect();
+        indices.shuffle(&mut rng);
+        for &idx in indices.iter().take(count) {
+            let st = idx % num_states;
+            let sy = idx / num_states;
+            let (next_st, write_sy, action) = random_trans(&mut rng, num_states, num_symbols);
+            set_trans_raw(
+                &mut self.table,
+                num_states,
+                st,
+                sy,
+                next_st,
+                write_sy,
+                action,
+            );
+        }
     }
 
     /// One read / write / move on the shared tape.
@@ -240,6 +291,7 @@ impl Machine {
             start_y,
             speed: 0.0,
             active: true,
+            name: String::new(),
             rounds_at_speed: 0,
             steps_at_speed: 0,
         };
@@ -264,6 +316,27 @@ pub fn validate_map_size(width: usize, height: usize) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// How many of `n_rules` to rewrite for `percent` (1–100).
+///
+/// Uses round-half-up, then at least one rule when `n_rules > 0`.
+pub fn mutation_count(n_rules: usize, percent: u8) -> usize {
+    if n_rules == 0 {
+        return 0;
+    }
+    let percent = u32::from(percent.clamp(MIN_MUTATE_PERCENT, MAX_MUTATE_PERCENT));
+    let n = n_rules as u32;
+    let count = (n * percent + 50) / 100;
+    (count as usize).clamp(1, n_rules)
+}
+
+fn random_trans<R: Rng>(rng: &mut R, num_states: usize, num_symbols: usize) -> (i32, i32, i32) {
+    let next_st = rng.random_range(0..num_states) as i32;
+    // Never write symbol 0 (red = untouched), matching the original
+    let write_sy = rng.random_range(1..num_symbols) as i32;
+    let action = rng.random_range(0..NUM_ACTIONS);
+    (next_st, write_sy, action)
 }
 
 /// Relative step rate for a speed slider value.
@@ -297,4 +370,19 @@ fn set_trans_raw(
     table[idx] = st1;
     table[idx + 1] = sy1;
     table[idx + 2] = ac1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mutation_count_rounds_and_has_floor() {
+        assert_eq!(mutation_count(12, 10), 1);
+        assert_eq!(mutation_count(12, 100), 12);
+        assert_eq!(mutation_count(2, 10), 1);
+        assert_eq!(mutation_count(0, 10), 0);
+        assert_eq!(mutation_count(10, 50), 5);
+        assert_eq!(mutation_count(15, 10), 2);
+    }
 }

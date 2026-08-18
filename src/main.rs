@@ -7,19 +7,21 @@ use iced::widget::{
     toggler, Space,
 };
 use iced::{
-    clipboard, event, keyboard, time, window, Alignment, Element, Event, Length, Size,
+    clipboard, event, keyboard, mouse, time, window, Alignment, Element, Event, Length, Size,
     Subscription, Task, Theme,
 };
 
 use turing_drawing::chrome;
 use turing_drawing::color_picker::{self, ColorPicker, ControlsMessage, GradientEndpoint};
-use turing_drawing::drawing::simulation_frame;
+use turing_drawing::drawing::{self, simulation_frame};
 use turing_drawing::gpu_raster::{self, RasterMode};
 use turing_drawing::palette::{fill_rgba_from_map, rgba_from_map, Palette, PaletteKind};
 use turing_drawing::preset::{self, PresetInfo, PresetSort};
 use turing_drawing::program::{
-    step_rate, Program, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED, MAX_MAP_SIZE,
-    MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_STATES, MIN_SYMBOLS,
+    default_machine_name, remap_index_after_reorder, step_rate, Program, DEFAULT_MAP_HEIGHT,
+    DEFAULT_MAP_WIDTH, DEFAULT_MUTATE_PERCENT, MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_MUTATE_PERCENT,
+    MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES,
+    MIN_SYMBOLS,
 };
 
 const DEFAULT_REFRESH_HZ: u32 = 60;
@@ -147,6 +149,9 @@ fn theme(_app: &App) -> Theme {
 }
 
 fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Message> {
+    if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
+        return Some(Message::MachineDragEnd);
+    }
     if status == event::Status::Captured {
         return None;
     }
@@ -190,6 +195,8 @@ struct App {
     color_picker: ColorPicker,
     /// Machine whose inspector section is open.
     selected_machine: Option<usize>,
+    /// Machine currently being dragged in the left pool.
+    dragging_machine: Option<usize>,
     /// Whether the preset browser overlay is open.
     preset_browser_open: bool,
     /// Name field for storing a new/overwrite preset.
@@ -205,6 +212,12 @@ struct App {
     mode_switch_resume_at: Option<Instant>,
     /// GPU colorize (default) or the CPU RGBA fallback.
     raster_mode: RasterMode,
+    /// Shared mutate slider (`MIN_MUTATE_PERCENT`..=`MAX_MUTATE_PERCENT`).
+    mutate_percent: f32,
+    /// Machine whose start position will be set by the next canvas click.
+    picking_start: Option<usize>,
+    /// Swallow the double-click that follows a start-position pick.
+    suppress_drawing_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,14 +243,28 @@ enum Message {
     MaxItrsChanged(f32),
     RasterMode(RasterMode),
     Random,
+    Mutate,
+    MutateMachine(usize),
+    MutatePercent(f32),
     Restart,
     AddMachine,
     RemoveMachine(usize),
     RandomizeMachine(usize),
     SelectMachine(usize),
     CloseMachineDetails,
+    MachineNameChanged(usize, String),
+    MachineDragStart(usize),
+    MachineDragOver(usize),
+    MachineDragEnd,
     MachineSpeedChanged(usize, f32),
     ToggleMachineActive(usize, bool),
+    TogglePickStart(usize),
+    CanvasClicked {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    },
     ShareChanged(usize, String),
     CopyShare(usize),
     LoadShare(usize),
@@ -289,6 +316,7 @@ impl App {
                 palette,
                 color_picker: ColorPicker::new(),
                 selected_machine: None,
+                dragging_machine: None,
                 preset_browser_open: false,
                 preset_name: String::new(),
                 preset_list: Vec::new(),
@@ -298,6 +326,9 @@ impl App {
                 simulation_open: true,
                 mode_switch_resume_at: None,
                 raster_mode: RasterMode::Gpu,
+                mutate_percent: f32::from(DEFAULT_MUTATE_PERCENT),
+                picking_start: None,
+                suppress_drawing_only: false,
             },
             Task::none(),
         )
@@ -338,6 +369,12 @@ impl App {
             .collect();
     }
 
+    fn mutate_percent_u8(&self) -> u8 {
+        self.mutate_percent
+            .round()
+            .clamp(f32::from(MIN_MUTATE_PERCENT), f32::from(MAX_MUTATE_PERCENT)) as u8
+    }
+
     fn refresh_preset_list(&mut self) {
         match preset::list_presets() {
             Ok(mut list) => {
@@ -358,6 +395,8 @@ impl App {
         self.sync_resolution_text();
         self.palette.resolve(self.num_symbols);
         self.selected_machine = None;
+        self.dragging_machine = None;
+        self.picking_start = None;
         self.sync_share_texts();
         self.status = label.to_string();
         self.refresh_frame();
@@ -487,6 +526,20 @@ impl App {
                 self.refresh_frame();
                 Task::none()
             }
+            Message::Mutate => {
+                let percent = self.mutate_percent_u8();
+                let n = self.program.machines.len();
+                self.program.mutate_all(percent);
+                self.sync_share_texts();
+                self.status = format!("Mutated {n} machine(s) at {percent}%");
+                self.refresh_frame();
+                Task::none()
+            }
+            Message::MutatePercent(value) => {
+                self.mutate_percent =
+                    value.clamp(f32::from(MIN_MUTATE_PERCENT), f32::from(MAX_MUTATE_PERCENT));
+                Task::none()
+            }
             Message::Restart => {
                 self.program.reset();
                 self.status = "Restarted".into();
@@ -522,7 +575,8 @@ impl App {
             Message::RandomizeMachine(i) => match self.program.randomize_machine(i) {
                 Ok(()) => {
                     self.sync_share_texts();
-                    self.status = format!("Randomised machine {}; program reset", i + 1);
+                    let name = self.program.machines[i].display_name(i);
+                    self.status = format!("Randomised {name}; program reset");
                     self.refresh_frame();
                     Task::none()
                 }
@@ -531,7 +585,79 @@ impl App {
                     Task::none()
                 }
             },
+            Message::MutateMachine(i) => {
+                match self.program.mutate_machine(i, self.mutate_percent_u8()) {
+                    Ok(()) => {
+                        self.sync_share_texts();
+                        let name = self.program.machines[i].display_name(i);
+                        let percent = self.mutate_percent_u8();
+                        self.status = format!("Mutated {name} at {percent}%");
+                        self.refresh_frame();
+                        Task::none()
+                    }
+                    Err(e) => {
+                        self.status = e;
+                        Task::none()
+                    }
+                }
+            }
+            Message::TogglePickStart(i) => {
+                if i >= self.program.machines.len() {
+                    self.status = "invalid machine index".into();
+                    return Task::none();
+                }
+                self.picking_start = if self.picking_start == Some(i) {
+                    None
+                } else {
+                    Some(i)
+                };
+                self.status = if let Some(index) = self.picking_start {
+                    let name = self.program.machines[index].display_name(index);
+                    format!("Click the canvas to set start for {name}")
+                } else {
+                    "Cancelled start placement".into()
+                };
+                Task::none()
+            }
+            Message::CanvasClicked {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let Some(index) = self.picking_start else {
+                    return Task::none();
+                };
+                let Some((cx, cy)) = gpu_raster::map_cell_at(
+                    self.program.width,
+                    self.program.height,
+                    width,
+                    height,
+                    x,
+                    y,
+                ) else {
+                    return Task::none();
+                };
+                match self.program.set_machine_start(index, cx, cy) {
+                    Ok(()) => {
+                        let name = self.program.machines[index].display_name(index);
+                        self.picking_start = None;
+                        self.suppress_drawing_only = true;
+                        self.sync_share_texts();
+                        self.status =
+                            format!("Start for {name} set to ({cx}, {cy}); program reset");
+                        self.refresh_frame();
+                    }
+                    Err(e) => {
+                        self.status = e;
+                    }
+                }
+                Task::none()
+            }
             Message::SelectMachine(i) => {
+                if self.dragging_machine.is_some() {
+                    return Task::none();
+                }
                 self.selected_machine = if self.selected_machine == Some(i) {
                     None
                 } else {
@@ -541,6 +667,40 @@ impl App {
             }
             Message::CloseMachineDetails => {
                 self.selected_machine = None;
+                Task::none()
+            }
+            Message::MachineNameChanged(i, name) => match self.program.set_machine_name(i, name) {
+                Ok(()) => Task::none(),
+                Err(e) => {
+                    self.status = e;
+                    Task::none()
+                }
+            },
+            Message::MachineDragStart(i) => {
+                if self.program.machines.len() < 2 || i >= self.program.machines.len() {
+                    return Task::none();
+                }
+                self.dragging_machine = Some(i);
+                self.selected_machine = Some(i);
+                Task::none()
+            }
+            Message::MachineDragOver(to) => {
+                let Some(from) = self.dragging_machine else {
+                    return Task::none();
+                };
+                if from == to {
+                    return Task::none();
+                }
+                match self.apply_machine_reorder(from, to) {
+                    Ok(()) => Task::none(),
+                    Err(e) => {
+                        self.status = e;
+                        Task::none()
+                    }
+                }
+            }
+            Message::MachineDragEnd => {
+                self.dragging_machine = None;
                 Task::none()
             }
             Message::MachineSpeedChanged(i, speed) => {
@@ -571,7 +731,11 @@ impl App {
                 let Some(text) = self.share_texts.get(i).cloned() else {
                     return Task::none();
                 };
-                self.status = format!("Copied machine {} encoding to clipboard", i + 1);
+                let name = self.program.machines.get(i).map(|m| m.display_name(i));
+                self.status = match name {
+                    Some(name) => format!("Copied {name} encoding to clipboard"),
+                    None => "Copied encoding to clipboard".into(),
+                };
                 clipboard::write(text)
             }
             Message::LoadShare(i) => {
@@ -584,7 +748,8 @@ impl App {
                         self.num_symbols = self.program.num_symbols;
                         self.palette.resolve(self.num_symbols);
                         self.sync_share_texts();
-                        self.status = format!("Loaded encoding for machine {}", i + 1);
+                        let name = self.program.machines[i].display_name(i);
+                        self.status = format!("Loaded encoding for {name}");
                         self.refresh_frame();
                         Task::none()
                     }
@@ -595,6 +760,10 @@ impl App {
                 }
             }
             Message::ToggleDrawingOnly => {
+                if self.suppress_drawing_only {
+                    self.suppress_drawing_only = false;
+                    return Task::none();
+                }
                 self.drawing_only = !self.drawing_only;
                 Task::none()
             }
@@ -611,8 +780,17 @@ impl App {
                 Task::none()
             }
             Message::Escape => {
+                if self.picking_start.is_some() {
+                    self.picking_start = None;
+                    self.status = "Cancelled start placement".into();
+                    return Task::none();
+                }
                 if self.preset_browser_open {
                     self.preset_browser_open = false;
+                    return Task::none();
+                }
+                if self.dragging_machine.is_some() {
+                    self.dragging_machine = None;
                     return Task::none();
                 }
                 if self.selected_machine.is_some() {
@@ -866,6 +1044,38 @@ impl App {
                 self.selected_machine = Some(selected - 1);
             }
         }
+        if let Some(dragging) = self.dragging_machine {
+            if dragging == removed {
+                self.dragging_machine = None;
+            } else if dragging > removed {
+                self.dragging_machine = Some(dragging - 1);
+            }
+        }
+        if let Some(picking) = self.picking_start {
+            if picking == removed {
+                self.picking_start = None;
+            } else if picking > removed {
+                self.picking_start = Some(picking - 1);
+            }
+        }
+    }
+
+    fn apply_machine_reorder(&mut self, from: usize, to: usize) -> Result<(), String> {
+        self.program.reorder_machines(from, to)?;
+        if from != to && from < self.share_texts.len() && to < self.share_texts.len() {
+            let text = self.share_texts.remove(from);
+            self.share_texts.insert(to, text);
+        }
+        if let Some(selected) = self.selected_machine {
+            self.selected_machine = Some(remap_index_after_reorder(selected, from, to));
+        }
+        if let Some(dragging) = self.dragging_machine {
+            self.dragging_machine = Some(remap_index_after_reorder(dragging, from, to));
+        }
+        if let Some(picking) = self.picking_start {
+            self.picking_start = Some(remap_index_after_reorder(picking, from, to));
+        }
+        Ok(())
     }
 
     fn drawing_canvas(&self) -> Element<'_, Message> {
@@ -879,7 +1089,24 @@ impl App {
             .into(),
             RasterMode::Cpu => simulation_frame(self.frame.clone()).into(),
         };
-        container(mouse_area(drawing).on_double_click(Message::ToggleDrawingOnly))
+        let picking = self.picking_start.is_some();
+        let drawing = if picking {
+            drawing::capture_click(drawing, |point, size| Message::CanvasClicked {
+                x: point.x,
+                y: point.y,
+                width: size.width,
+                height: size.height,
+            })
+        } else {
+            drawing
+        };
+        let mut area = mouse_area(drawing);
+        if picking {
+            area = area.interaction(mouse::Interaction::Crosshair);
+        } else {
+            area = area.on_double_click(Message::ToggleDrawingOnly);
+        }
+        container(area)
             .center(Length::Fill)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -932,6 +1159,17 @@ impl App {
         container(
             row![
                 chrome::compact_button("Random").on_press(Message::Random),
+                chrome::compact_button("Mutate").on_press(Message::Mutate),
+                chrome::dim("Mutate %"),
+                slider(
+                    f32::from(MIN_MUTATE_PERCENT)..=f32::from(MAX_MUTATE_PERCENT),
+                    self.mutate_percent,
+                    Message::MutatePercent,
+                )
+                .step(1.0_f32)
+                .width(100)
+                .style(chrome::slider_style),
+                chrome::dim(format!("{:.0}%", self.mutate_percent)).width(36),
                 chrome::compact_button("Restart").on_press(Message::Restart),
                 chrome::compact_button("Presets").on_press(Message::OpenPresetBrowser),
                 Space::new().width(Length::Fill),
@@ -947,56 +1185,76 @@ impl App {
     }
 
     fn machine_panel(&self) -> Element<'_, Message> {
+        let can_reorder = self.program.machines.len() > 1;
         let mut list = column![].spacing(6);
         for i in 0..self.program.machines.len() {
             let selected = self.selected_machine == Some(i);
+            let dragging = self.dragging_machine == Some(i);
             let speed = self.program.machines[i].speed;
             let active = self.program.machines[i].active;
+            let name = self.program.machines[i].display_name(i);
+
+            let mut title = row![].spacing(6).align_y(Alignment::Center);
+            if can_reorder {
+                title = title.push(
+                    mouse_area(chrome::drag_handle())
+                        .on_press(Message::MachineDragStart(i))
+                        .interaction(if dragging {
+                            mouse::Interaction::Grabbing
+                        } else {
+                            mouse::Interaction::Grab
+                        }),
+                );
+            }
+            title = title
+                .push(chrome::value(name))
+                .push(Space::new().width(Length::Fill))
+                .push(chrome::dim("Active"))
+                .push(machine_active_toggler(i, active));
+
+            let picking = self.picking_start == Some(i);
+            let set_start = if picking {
+                chrome::accent_button("Set start")
+            } else {
+                chrome::compact_button("Set start")
+            }
+            .on_press(Message::TogglePickStart(i));
+            let actions = row![
+                chrome::compact_button("Randomise").on_press(Message::RandomizeMachine(i)),
+                chrome::compact_button("Mutate").on_press(Message::MutateMachine(i)),
+                set_start,
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center);
+
             list = list.push(
                 mouse_area(
-                    container(
-                        column![
-                            row![
-                                chrome::value(format!("Machine {}", i + 1)),
-                                Space::new().width(Length::Fill),
-                                chrome::dim("Active"),
-                                machine_active_toggler(i, active),
-                                chrome::compact_button("Randomise")
-                                    .on_press(Message::RandomizeMachine(i)),
-                            ]
-                            .spacing(6)
-                            .align_y(Alignment::Center),
-                            machine_speed_slider(i, speed),
-                        ]
-                        .spacing(4),
-                    )
-                    .padding(8)
-                    .width(Length::Fill)
-                    .style(chrome::machine_card(selected, active)),
+                    container(column![title, actions, machine_speed_slider(i, speed)].spacing(4))
+                        .padding(8)
+                        .width(Length::Fill)
+                        .style(chrome::machine_card(selected, active, dragging)),
                 )
-                .on_press(Message::SelectMachine(i)),
+                .on_press(Message::SelectMachine(i))
+                .on_enter(Message::MachineDragOver(i)),
             );
         }
 
         let mut panel = column![
             row![
-                container(chrome::dim("MACHINES"))
-                    .padding(iced::Padding {
-                        top: 8.0,
-                        right: 0.0,
-                        bottom: 4.0,
-                        left: 10.0,
-                    }),
-                Space::new().width(Length::Fill),
-                container(
-                    chrome::compact_button("Add machine").on_press(Message::AddMachine),
-                )
-                .padding(iced::Padding {
-                    top: 4.0,
-                    right: 8.0,
+                container(chrome::dim("MACHINES")).padding(iced::Padding {
+                    top: 8.0,
+                    right: 0.0,
                     bottom: 4.0,
-                    left: 0.0,
+                    left: 10.0,
                 }),
+                Space::new().width(Length::Fill),
+                container(chrome::compact_button("Add machine").on_press(Message::AddMachine),)
+                    .padding(iced::Padding {
+                        top: 4.0,
+                        right: 8.0,
+                        bottom: 4.0,
+                        left: 0.0,
+                    }),
             ]
             .align_y(Alignment::Center)
             .width(Length::Fill),
@@ -1174,12 +1432,8 @@ impl App {
             inspector_row(
                 "Raster",
                 chrome::decorate_pick_list(
-                    pick_list(
-                        RasterMode::ALL,
-                        Some(self.raster_mode),
-                        Message::RasterMode,
-                    )
-                    .width(Length::Fill),
+                    pick_list(RasterMode::ALL, Some(self.raster_mode), Message::RasterMode,)
+                        .width(Length::Fill),
                 ),
             ),
         ]
@@ -1189,6 +1443,7 @@ impl App {
 
     fn machine_inspector(&self, index: usize) -> Element<'_, Message> {
         let machine = &self.program.machines[index];
+        let name_placeholder = default_machine_name(index);
         let share = self
             .share_texts
             .get(index)
@@ -1202,7 +1457,7 @@ impl App {
         }
 
         let header = row![
-            chrome::dim(format!("MACHINE {}", index + 1)),
+            chrome::dim(machine.display_name(index)),
             Space::new().width(Length::Fill),
             chrome::compact_button("Close").on_press(Message::CloseMachineDetails),
         ]
@@ -1213,6 +1468,10 @@ impl App {
             header,
             container(
                 column![
+                    chrome::label("Name"),
+                    chrome::field(&name_placeholder, &machine.name)
+                        .on_input(move |s| Message::MachineNameChanged(index, s))
+                        .width(Length::Fill),
                     chrome::dim(format!(
                         "State {}  ·  ({}, {})  ·  start ({}, {})",
                         machine.state,

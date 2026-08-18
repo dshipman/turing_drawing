@@ -35,6 +35,41 @@ pub fn pack_map(map: &[i32]) -> Vec<u8> {
     map.iter().map(|&sy| sy as u8).collect()
 }
 
+/// Map a widget-local point onto a tape cell using contain + letterbox.
+pub fn map_cell_at(
+    map_width: usize,
+    map_height: usize,
+    widget_w: f32,
+    widget_h: f32,
+    x: f32,
+    y: f32,
+) -> Option<(i32, i32)> {
+    if map_width == 0 || map_height == 0 || widget_w <= 0.0 || widget_h <= 0.0 {
+        return None;
+    }
+    let map_w = map_width as f32;
+    let map_h = map_height as f32;
+    let scale = (widget_w / map_w).min(widget_h / map_h);
+    if scale <= 0.0 {
+        return None;
+    }
+    let drawn_w = map_w * scale;
+    let drawn_h = map_h * scale;
+    let origin_x = (widget_w - drawn_w) * 0.5;
+    let origin_y = (widget_h - drawn_h) * 0.5;
+    let local_x = x - origin_x;
+    let local_y = y - origin_y;
+    if local_x < 0.0 || local_y < 0.0 || local_x >= drawn_w || local_y >= drawn_h {
+        return None;
+    }
+    let cx = (local_x / scale).floor() as i32;
+    let cy = (local_y / scale).floor() as i32;
+    if cx < 0 || cy < 0 || (cx as usize) >= map_width || (cy as usize) >= map_height {
+        return None;
+    }
+    Some((cx, cy))
+}
+
 /// CPU reference for the GPU fragment shader (contain / nearest / palette LUT).
 #[allow(clippy::too_many_arguments)]
 pub fn gpu_lookup_rgba(
@@ -47,27 +82,10 @@ pub fn gpu_lookup_rgba(
     x: f32,
     y: f32,
 ) -> [u8; 4] {
-    if width == 0 || height == 0 || widget_w <= 0.0 || widget_h <= 0.0 {
+    let Some((cx, cy)) = map_cell_at(width, height, widget_w, widget_h, x, y) else {
         return [0, 0, 0, 255];
-    }
-    let map_w = width as f32;
-    let map_h = height as f32;
-    let scale = (widget_w / map_w).min(widget_h / map_h);
-    let drawn_w = map_w * scale;
-    let drawn_h = map_h * scale;
-    let origin_x = (widget_w - drawn_w) * 0.5;
-    let origin_y = (widget_h - drawn_h) * 0.5;
-    let local_x = x - origin_x;
-    let local_y = y - origin_y;
-    if local_x < 0.0 || local_y < 0.0 || local_x >= drawn_w || local_y >= drawn_h {
-        return [0, 0, 0, 255];
-    }
-    let cx = (local_x / scale).floor() as usize;
-    let cy = (local_y / scale).floor() as usize;
-    if cx >= width || cy >= height {
-        return [0, 0, 0, 255];
-    }
-    let sy = map[cy * width + cx] as usize;
+    };
+    let sy = map[cy as usize * width + cx as usize] as usize;
     let c = colors[sy.min(MAX_SYMBOLS - 1)];
     [c[0], c[1], c[2], 255]
 }
@@ -465,6 +483,15 @@ mod tests {
         colors[1] = [255, 0, 0];
         let rgba = gpu_lookup_rgba(&map, 1, 1, &colors, 4.0, 2.0, 0.2, 1.0);
         assert_eq!(rgba, [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn map_cell_at_hits_cell_and_skips_letterbox() {
+        assert_eq!(map_cell_at(2, 2, 4.0, 4.0, 2.5, 0.5), Some((1, 0)));
+        assert_eq!(map_cell_at(2, 2, 4.0, 4.0, 0.5, 2.5), Some((0, 1)));
+        assert_eq!(map_cell_at(1, 1, 4.0, 2.0, 0.2, 1.0), None);
+        assert_eq!(map_cell_at(1, 1, 4.0, 2.0, 2.0, 1.0), Some((0, 0)));
+        assert_eq!(map_cell_at(0, 1, 4.0, 4.0, 1.0, 1.0), None);
     }
 
     #[test]

@@ -3,9 +3,23 @@
 use crate::machine::{validate_map_size, wrap_pos, Machine};
 
 pub use crate::machine::{
-    step_rate, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_STATES,
-    MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_STATES, MIN_SYMBOLS,
+    default_machine_name, mutation_count, step_rate, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH,
+    DEFAULT_MUTATE_PERCENT, MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_MUTATE_PERCENT, MAX_STATES,
+    MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES, MIN_SYMBOLS,
 };
+
+/// Where `index` lands after `remove(from)` then `insert(to)`.
+pub fn remap_index_after_reorder(index: usize, from: usize, to: usize) -> usize {
+    if index == from {
+        to
+    } else if from < to && index > from && index <= to {
+        index - 1
+    } else if to < from && index >= to && index < from {
+        index + 1
+    } else {
+        index
+    }
+}
 
 /// The program: shared grid, shared alphabet size, and the machines that draw on it.
 #[derive(Debug, Clone)]
@@ -39,13 +53,15 @@ impl Program {
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
         assert!(validate_map_size(width, height).is_ok());
 
+        let mut machine = Machine::new_random(num_states, num_symbols, width, height);
+        machine.name = default_machine_name(0);
         let mut prog = Self {
             num_states,
             num_symbols,
             width,
             height,
             map: vec![0; width * height],
-            machines: vec![Machine::new_random(num_states, num_symbols, width, height)],
+            machines: vec![machine],
             itr_count: 0,
         };
         prog.reset();
@@ -54,7 +70,8 @@ impl Program {
 
     /// Parse a single-machine encoding into a one-machine program on the default canvas.
     pub fn from_string(s: &str) -> Result<Self, String> {
-        let parsed = Machine::from_string(s, DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT)?;
+        let mut parsed = Machine::from_string(s, DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT)?;
+        parsed.machine.name = default_machine_name(0);
         let mut prog = Self {
             num_states: parsed.num_states,
             num_symbols: parsed.num_symbols,
@@ -96,7 +113,7 @@ impl Program {
     }
 
     /// Replace every machine with a new random table and start, using `num_states` /
-    /// `num_symbols`. Keeps the current machine count.
+    /// `num_symbols`. Keeps the current machine count, names, and speed sliders.
     pub fn randomize(&mut self, num_states: usize, num_symbols: usize) {
         assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
@@ -104,30 +121,68 @@ impl Program {
         self.num_states = num_states;
         self.num_symbols = num_symbols;
         let speeds: Vec<f32> = self.machines.iter().map(|m| m.speed).collect();
+        let names: Vec<String> = self.machines.iter().map(|m| m.name.clone()).collect();
         let n = self.machines.len().max(1);
         let (width, height) = (self.width, self.height);
         self.machines = (0..n)
             .map(|_| Machine::new_random(num_states, num_symbols, width, height))
             .collect();
-        for (machine, speed) in self.machines.iter_mut().zip(speeds) {
-            machine.speed = speed;
+        for (i, machine) in self.machines.iter_mut().enumerate() {
+            if let Some(speed) = speeds.get(i) {
+                machine.speed = *speed;
+            }
+            machine.name = names
+                .get(i)
+                .cloned()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| default_machine_name(i));
         }
         self.reset();
     }
 
     /// Replace one machine with a new random table and start, then reset.
     /// Uses the program's current state/symbol counts so other machines stay valid.
-    /// Keeps the slot's speed slider.
+    /// Keeps the slot's speed slider, active flag, and name.
     pub fn randomize_machine(&mut self, index: usize) -> Result<(), String> {
         if index >= self.machines.len() {
             return Err("invalid machine index".into());
         }
         let speed = self.machines[index].speed;
         let active = self.machines[index].active;
+        let name = self.machines[index].name.clone();
         self.machines[index] =
             Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
         self.machines[index].speed = speed;
         self.machines[index].active = active;
+        self.machines[index].name = name;
+        self.reset();
+        Ok(())
+    }
+
+    /// Re-randomize `percent` of one machine's transition rules. Does not reset.
+    pub fn mutate_machine(&mut self, index: usize, percent: u8) -> Result<(), String> {
+        let Some(machine) = self.machines.get_mut(index) else {
+            return Err("invalid machine index".into());
+        };
+        machine.mutate_table(self.num_states, self.num_symbols, percent);
+        Ok(())
+    }
+
+    /// Re-randomize `percent` of every machine's transition rules. Does not reset.
+    pub fn mutate_all(&mut self, percent: u8) {
+        let (num_states, num_symbols) = (self.num_states, self.num_symbols);
+        for machine in &mut self.machines {
+            machine.mutate_table(num_states, num_symbols, percent);
+        }
+    }
+
+    /// Set one machine's persistent start cell, wrap to the canvas, and reset.
+    pub fn set_machine_start(&mut self, index: usize, x: i32, y: i32) -> Result<(), String> {
+        let Some(machine) = self.machines.get_mut(index) else {
+            return Err("invalid machine index".into());
+        };
+        machine.start_x = wrap_pos(x, self.width as i32);
+        machine.start_y = wrap_pos(y, self.height as i32);
         self.reset();
         Ok(())
     }
@@ -150,14 +205,21 @@ impl Program {
         Ok(())
     }
 
+    /// Set one machine's display name (may be empty; UI falls back to a default).
+    pub fn set_machine_name(&mut self, index: usize, name: String) -> Result<(), String> {
+        let Some(machine) = self.machines.get_mut(index) else {
+            return Err("invalid machine index".into());
+        };
+        machine.name = name;
+        Ok(())
+    }
+
     /// Append a random machine with the current counts, then reset the program.
     pub fn add_machine(&mut self) {
-        self.machines.push(Machine::new_random(
-            self.num_states,
-            self.num_symbols,
-            self.width,
-            self.height,
-        ));
+        let mut machine =
+            Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
+        machine.name = default_machine_name(self.machines.len());
+        self.machines.push(machine);
         self.reset();
     }
 
@@ -174,6 +236,19 @@ impl Program {
         Ok(())
     }
 
+    /// Move a machine from `from` to `to` without resetting the drawing.
+    pub fn reorder_machines(&mut self, from: usize, to: usize) -> Result<(), String> {
+        let n = self.machines.len();
+        if from >= n || to >= n {
+            return Err("invalid machine index".into());
+        }
+        if from != to {
+            let machine = self.machines.remove(from);
+            self.machines.insert(to, machine);
+        }
+        Ok(())
+    }
+
     /// Load an encoding into `index`. If this is the only machine, shared counts
     /// may change. With multiple machines, counts must match.
     pub fn load_machine(&mut self, index: usize, s: &str) -> Result<(), String> {
@@ -183,11 +258,13 @@ impl Program {
 
         let parsed = Machine::from_string(s, self.width, self.height)?;
         let speed = self.machines[index].speed;
+        let name = self.machines[index].name.clone();
         if self.machines.len() == 1 {
             self.num_states = parsed.num_states;
             self.num_symbols = parsed.num_symbols;
             self.machines[0] = parsed.machine;
             self.machines[0].speed = speed;
+            self.machines[0].name = name;
             self.reset();
             return Ok(());
         }
@@ -201,6 +278,7 @@ impl Program {
 
         self.machines[index] = parsed.machine;
         self.machines[index].speed = speed;
+        self.machines[index].name = name;
         self.reset();
         Ok(())
     }
@@ -242,6 +320,7 @@ mod tests {
             start_y,
             speed: 0.0,
             active: true,
+            name: String::new(),
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -623,5 +702,192 @@ mod tests {
         assert!(p.set_size(512, 5000).is_err());
         p.set_size(128, 64).unwrap();
         assert_eq!(p.width, 128);
+    }
+
+    #[test]
+    fn new_and_added_machines_get_default_names() {
+        let mut p = Program::new_random(2, 2);
+        assert_eq!(p.machines[0].name, "Machine 1");
+        p.add_machine();
+        assert_eq!(p.machines[1].name, "Machine 2");
+        let q = Program::from_string(&p.machine_encoding(0)).unwrap();
+        assert_eq!(q.machines[0].name, "Machine 1");
+    }
+
+    #[test]
+    fn randomize_and_load_keep_machine_name() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine();
+        p.set_machine_name(0, "Walker".into()).unwrap();
+        p.set_machine_name(1, "Hopper".into()).unwrap();
+        let other = p.machines[1].clone();
+
+        p.randomize_machine(0).unwrap();
+        assert_eq!(p.machines[0].name, "Walker");
+        assert_eq!(p.machines[1].name, "Hopper");
+        assert_eq!(p.machines[1].table, other.table);
+
+        p.randomize(3, 3);
+        assert_eq!(p.machines[0].name, "Walker");
+        assert_eq!(p.machines[1].name, "Hopper");
+        assert_eq!(p.num_states, 3);
+
+        let enc = Machine::new_random(3, 3, p.width, p.height).to_string(3, 3);
+        p.load_machine(1, &enc).unwrap();
+        assert_eq!(p.machines[1].name, "Hopper");
+        assert!(p.set_machine_name(9, "x".into()).is_err());
+    }
+
+    #[test]
+    fn display_name_falls_back_when_empty() {
+        let mut p = Program::new_random(2, 2);
+        p.machines[0].name.clear();
+        assert_eq!(p.machines[0].display_name(0), "Machine 1");
+        p.machines[0].name = "  ".into();
+        assert_eq!(p.machines[0].display_name(0), "Machine 1");
+        p.machines[0].name = "  custom  ".into();
+        assert_eq!(p.machines[0].display_name(0), "custom");
+    }
+
+    #[test]
+    fn remap_index_after_reorder_shifts_neighbors() {
+        // 0 1 2 3, move 0 -> 2 => 1 2 0 3
+        assert_eq!(remap_index_after_reorder(0, 0, 2), 2);
+        assert_eq!(remap_index_after_reorder(1, 0, 2), 0);
+        assert_eq!(remap_index_after_reorder(2, 0, 2), 1);
+        assert_eq!(remap_index_after_reorder(3, 0, 2), 3);
+        // move 3 -> 0 => 3 0 1 2
+        assert_eq!(remap_index_after_reorder(3, 3, 0), 0);
+        assert_eq!(remap_index_after_reorder(0, 3, 0), 1);
+        assert_eq!(remap_index_after_reorder(2, 3, 0), 3);
+        assert_eq!(remap_index_after_reorder(1, 1, 1), 1);
+    }
+
+    #[test]
+    fn reorder_machines_moves_without_reset() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine();
+        p.add_machine();
+        p.machines[0].name = "A".into();
+        p.machines[1].name = "B".into();
+        p.machines[2].name = "C".into();
+        p.update(5);
+        let itrs = p.itr_count;
+        assert!(p.map.iter().any(|&s| s != 0));
+        let map_before = p.map.clone();
+
+        p.reorder_machines(0, 2).unwrap();
+        assert_eq!(p.machines[0].name, "B");
+        assert_eq!(p.machines[1].name, "C");
+        assert_eq!(p.machines[2].name, "A");
+        assert_eq!(p.itr_count, itrs);
+        assert_eq!(p.map, map_before);
+
+        p.reorder_machines(2, 0).unwrap();
+        assert_eq!(p.machines[0].name, "A");
+        assert_eq!(p.machines[1].name, "B");
+        assert_eq!(p.machines[2].name, "C");
+
+        p.reorder_machines(1, 1).unwrap();
+        assert_eq!(p.machines[1].name, "B");
+        assert!(p.reorder_machines(0, 9).is_err());
+        assert!(p.reorder_machines(9, 0).is_err());
+    }
+
+    #[test]
+    fn mutate_machine_rewrites_table_without_reset() {
+        let mut p = Program::new_random(4, 3);
+        p.add_machine();
+        p.update(50);
+        let start = (p.machines[0].start_x, p.machines[0].start_y);
+        let pos = (p.machines[0].x_pos, p.machines[0].y_pos);
+        let state = p.machines[0].state;
+        let other = p.machines[1].clone();
+        let itrs = p.itr_count;
+        let map = p.map.clone();
+
+        p.mutate_machine(0, 10).unwrap();
+        assert_eq!((p.machines[0].start_x, p.machines[0].start_y), start);
+        assert_eq!((p.machines[0].x_pos, p.machines[0].y_pos), pos);
+        assert_eq!(p.machines[0].state, state);
+        assert_eq!(p.itr_count, itrs);
+        assert_eq!(p.map, map);
+        assert_eq!(p.machines[1].table, other.table);
+        assert_eq!(p.machines[1].start_x, other.start_x);
+
+        for sy0 in 0..p.num_symbols {
+            for st0 in 0..p.num_states {
+                let idx = (p.num_states * sy0 + st0) * 3;
+                let write = p.machines[0].table[idx + 1];
+                assert!(write >= 1 && write < p.num_symbols as i32);
+            }
+        }
+        assert!(p.mutate_machine(9, 10).is_err());
+    }
+
+    #[test]
+    fn mutate_all_rewrites_every_machine() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine();
+        for machine in &mut p.machines {
+            for chunk in machine.table.chunks_mut(3) {
+                chunk[1] = 0;
+            }
+        }
+        p.update(8);
+        let itrs = p.itr_count;
+        let starts: Vec<_> = p
+            .machines
+            .iter()
+            .map(|m| (m.start_x, m.start_y, m.x_pos, m.y_pos))
+            .collect();
+
+        p.mutate_all(100);
+        assert_eq!(p.itr_count, itrs);
+        for (i, machine) in p.machines.iter().enumerate() {
+            assert_eq!(
+                (
+                    machine.start_x,
+                    machine.start_y,
+                    machine.x_pos,
+                    machine.y_pos
+                ),
+                starts[i]
+            );
+            for sy0 in 0..p.num_symbols {
+                for st0 in 0..p.num_states {
+                    let idx = (p.num_states * sy0 + st0) * 3;
+                    let write = machine.table[idx + 1];
+                    assert!(write >= 1 && write < p.num_symbols as i32);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn set_machine_start_wraps_and_resets() {
+        let mut p = fixed_program(1, 2, vec![0, 1, ACTION_LEFT], 0, 0);
+        p.update(10);
+        assert!(p.itr_count > 0);
+        assert!(p.map.iter().any(|&s| s != 0));
+
+        p.set_machine_start(0, 3, 4).unwrap();
+        assert_eq!(p.machines[0].start_x, 3);
+        assert_eq!(p.machines[0].start_y, 4);
+        assert_eq!(p.machines[0].x_pos, 3);
+        assert_eq!(p.machines[0].y_pos, 4);
+        assert_eq!(p.machines[0].state, 0);
+        assert_eq!(p.itr_count, 0);
+        assert!(p.map.iter().all(|&s| s == 0));
+
+        p.set_machine_start(0, -1, p.height as i32 + 5).unwrap();
+        assert_eq!(p.machines[0].start_x, wrap_pos(-1, p.width as i32));
+        assert_eq!(
+            p.machines[0].start_y,
+            wrap_pos(p.height as i32 + 5, p.height as i32)
+        );
+        assert_eq!(p.machines[0].x_pos, p.machines[0].start_x);
+        assert_eq!(p.machines[0].y_pos, p.machines[0].start_y);
+        assert!(p.set_machine_start(3, 0, 0).is_err());
     }
 }

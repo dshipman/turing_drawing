@@ -109,9 +109,15 @@ pub fn picker_panel(_theme: &Theme) -> container::Style {
     }
 }
 
-pub fn machine_card(selected: bool, active: bool) -> impl Fn(&Theme) -> container::Style {
+pub fn machine_card(
+    selected: bool,
+    active: bool,
+    dragging: bool,
+) -> impl Fn(&Theme) -> container::Style {
     move |_theme: &Theme| container::Style {
-        background: Some(Background::Color(if !active {
+        background: Some(Background::Color(if dragging {
+            Color::from_rgb8(0x32, 0x2A, 0x20)
+        } else if !active {
             Color::from_rgb8(0x14, 0x14, 0x14)
         } else if selected {
             Color::from_rgb8(0x2A, 0x24, 0x1C)
@@ -119,18 +125,22 @@ pub fn machine_card(selected: bool, active: bool) -> impl Fn(&Theme) -> containe
             Color::from_rgb8(0x18, 0x18, 0x18)
         })),
         border: Border {
-            color: if selected {
+            color: if dragging || selected {
                 ACCENT
             } else if !active {
                 Color::from_rgb8(0x2E, 0x2E, 0x2E)
             } else {
                 RULE
             },
-            width: 1.0,
+            width: if dragging { 2.0 } else { 1.0 },
             radius: RADIUS.into(),
         },
         ..container::Style::default()
     }
+}
+
+pub fn drag_handle<'a>() -> text::Text<'a> {
+    text("::").size(FONT_BODY).color(TEXT_DIM)
 }
 
 pub fn swatch_border(_theme: &Theme) -> Border {
@@ -159,6 +169,14 @@ pub fn compact_button<'a, Message: Clone + 'a>(
     button(text(label).size(FONT_BODY))
         .padding(BTN_PAD)
         .style(button_style)
+}
+
+pub fn accent_button<'a, Message: Clone + 'a>(
+    label: impl IntoFragment<'a>,
+) -> button::Button<'a, Message> {
+    button(text(label).size(FONT_BODY))
+        .padding(BTN_PAD)
+        .style(accent_button_style)
 }
 
 pub fn danger_button<'a, Message: Clone + 'a>(
@@ -211,6 +229,30 @@ pub fn button_style(_theme: &Theme, status: button::Status) -> button::Style {
         text_color,
         border: Border {
             color: RULE,
+            width: 1.0,
+            radius: RADIUS.into(),
+        },
+        shadow: Shadow::default(),
+        snap: true,
+    }
+}
+
+fn accent_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Active => Color::from_rgb8(0x3A, 0x2A, 0x18),
+        button::Status::Hovered => Color::from_rgb8(0x4A, 0x34, 0x1C),
+        button::Status::Pressed => Color::from_rgb8(0x32, 0x24, 0x14),
+        button::Status::Disabled => Color::from_rgb8(0x28, 0x28, 0x28),
+    };
+    let text_color = match status {
+        button::Status::Disabled => Color::from_rgb8(0x66, 0x66, 0x66),
+        _ => TEXT,
+    };
+    button::Style {
+        background: Some(Background::Color(background)),
+        text_color,
+        border: Border {
+            color: ACCENT,
             width: 1.0,
             radius: RADIUS.into(),
         },
