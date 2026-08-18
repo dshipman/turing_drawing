@@ -5,12 +5,14 @@ use iced::wgpu;
 use iced::widget::shader::{self, Viewport};
 use iced::widget::Shader;
 use iced::{Rectangle, Size};
+use serde::{Deserialize, Serialize};
 
 use crate::machine::MAX_SYMBOLS;
 use crate::palette::Rgb;
 
 /// How the symbol map is turned into colours for display.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RasterMode {
     #[default]
     Gpu,

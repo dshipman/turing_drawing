@@ -7,13 +7,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::machine::{
-    validate_map_size, wrap_pos, Machine, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED,
-    MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_STATES, MIN_SYMBOLS,
+    default_machine_name, validate_map_size, wrap_pos, Machine, DEFAULT_MAP_HEIGHT,
+    DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_STATES,
+    MIN_SYMBOLS,
 };
 use crate::program::Program;
+use crate::settings::PresetPerformanceBinding;
 
-const PRESET_VERSION: u32 = 1;
-const APP_DIR: &str = "turing_drawing";
+const PRESET_VERSION: u32 = 2;
+const MIN_PRESET_VERSION: u32 = 1;
 const PRESETS_SUBDIR: &str = "presets";
 
 /// One machine's starting configuration inside a preset.
@@ -24,6 +26,8 @@ pub struct PresetMachine {
     pub speed: f32,
     #[serde(default = "default_active")]
     pub active: bool,
+    #[serde(default)]
+    pub name: String,
     pub table: Vec<i32>,
 }
 
@@ -46,6 +50,9 @@ pub struct Preset {
     #[serde(default = "default_map_height")]
     pub map_height: usize,
     pub machines: Vec<PresetMachine>,
+    /// Per-machine performance shortcuts saved with this preset.
+    #[serde(default)]
+    pub performance_bindings: Vec<PresetPerformanceBinding>,
 }
 
 /// How the preset browser orders its list.
@@ -106,9 +113,11 @@ impl Program {
                     start_y: m.start_y,
                     speed: m.speed,
                     active: m.active,
+                    name: m.name.clone(),
                     table: m.table.clone(),
                 })
                 .collect(),
+            performance_bindings: Vec::new(),
         })
     }
 
@@ -121,10 +130,16 @@ impl Program {
         let machines: Vec<Machine> = preset
             .machines
             .iter()
-            .map(|m| {
+            .enumerate()
+            .map(|(i, m)| {
                 let start_x = wrap_pos(m.start_x, width as i32);
                 let start_y = wrap_pos(m.start_y, height as i32);
                 let speed = m.speed.clamp(MIN_MACHINE_SPEED, MAX_MACHINE_SPEED);
+                let name = if m.name.trim().is_empty() {
+                    default_machine_name(i)
+                } else {
+                    m.name.clone()
+                };
                 Machine {
                     table: m.table.clone(),
                     state: 0,
@@ -134,6 +149,8 @@ impl Program {
                     start_y,
                     speed,
                     active: m.active,
+                    name,
+                    id: 0,
                     rounds_at_speed: 0,
                     steps_at_speed: 0,
                 }
@@ -149,15 +166,16 @@ impl Program {
             machines,
             itr_count: 0,
         };
+        prog.ensure_machine_ids();
         prog.reset();
         Ok(prog)
     }
 }
 
 fn validate_preset(preset: &Preset) -> Result<(), String> {
-    if preset.version != PRESET_VERSION {
+    if preset.version < MIN_PRESET_VERSION || preset.version > PRESET_VERSION {
         return Err(format!(
-            "unsupported preset version {} (expected {PRESET_VERSION})",
+            "unsupported preset version {} (expected {MIN_PRESET_VERSION}..={PRESET_VERSION})",
             preset.version
         ));
     }
@@ -195,6 +213,26 @@ fn validate_preset(preset: &Preset) -> Result<(), String> {
             return Err(format!("machine {}: speed must be finite", i + 1));
         }
     }
+    for (i, binding) in preset.performance_bindings.iter().enumerate() {
+        if binding.machine_index >= preset.machines.len() {
+            return Err(format!(
+                "performance binding {}: machine index {} out of range ({} machines)",
+                i + 1,
+                binding.machine_index,
+                preset.machines.len()
+            ));
+        }
+        if !binding.action.is_performance() {
+            return Err(format!(
+                "performance binding {}: action {:?} is not a machine action",
+                i + 1,
+                binding.action
+            ));
+        }
+        if binding.key.is_none() && binding.named.is_none() {
+            return Err(format!("performance binding {}: missing key", i + 1));
+        }
+    }
     Ok(())
 }
 
@@ -230,9 +268,7 @@ pub fn sanitize_filename(name: &str) -> Result<String, String> {
 
 /// Directory that holds preset JSON files.
 pub fn presets_dir() -> Result<PathBuf, String> {
-    let base =
-        dirs::data_dir().ok_or_else(|| "could not resolve app data directory".to_string())?;
-    Ok(base.join(APP_DIR).join(PRESETS_SUBDIR))
+    Ok(crate::settings::app_data_dir()?.join(PRESETS_SUBDIR))
 }
 
 fn ensure_presets_dir() -> Result<PathBuf, String> {
@@ -407,6 +443,8 @@ mod tests {
             start_y,
             speed,
             active: true,
+            name: String::new(),
+            id: 0,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -475,8 +513,10 @@ mod tests {
                 start_y: 0,
                 speed: 0.0,
                 active: true,
+                name: String::new(),
                 table: vec![0, 1, 0, 0, 1, 0],
             }],
+            performance_bindings: Vec::new(),
         };
         assert!(validate_preset(&good).is_ok());
 
@@ -617,7 +657,26 @@ mod tests {
         assert_eq!(preset.saved_at, 0);
         assert_eq!(preset.map_width, DEFAULT_MAP_WIDTH);
         assert_eq!(preset.map_height, DEFAULT_MAP_HEIGHT);
+        assert!(preset.machines[0].name.is_empty());
         assert!(validate_preset(&preset).is_ok());
+        let q = Program::from_preset(&preset).unwrap();
+        assert_eq!(q.machines[0].name, "Machine 1");
+    }
+
+    #[test]
+    fn machine_name_roundtrips_in_preset() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine();
+        p.machines[0].name = "Walker".into();
+        p.machines[1].name = "Hopper".into();
+        let preset = p.to_preset("named").unwrap();
+        assert_eq!(preset.machines[0].name, "Walker");
+        assert_eq!(preset.machines[1].name, "Hopper");
+        let text = serde_json::to_string(&preset).unwrap();
+        let back: Preset = serde_json::from_str(&text).unwrap();
+        let q = Program::from_preset(&back).unwrap();
+        assert_eq!(q.machines[0].name, "Walker");
+        assert_eq!(q.machines[1].name, "Hopper");
     }
 
     #[test]
@@ -648,8 +707,10 @@ mod tests {
                 start_y: 0,
                 speed: 0.0,
                 active: true,
+                name: String::new(),
                 table: vec![0, 1, 0, 0, 1, 0],
             }],
+            performance_bindings: Vec::new(),
         };
         assert!(validate_preset(&bad).is_err());
         bad.map_width = 512;

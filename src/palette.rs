@@ -1,12 +1,16 @@
 //! Drawing colour palettes: presets and a user-defined gradient.
 
+use serde::{Deserialize, Serialize};
+
 use crate::machine::MAX_SYMBOLS;
 
 pub type Rgb = [u8; 3];
 
 /// Named palette modes selectable from the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PaletteKind {
+    #[default]
     Classic,
     Grayscale,
     Sunset,
@@ -95,8 +99,8 @@ const NEON: [Rgb; MAX_SYMBOLS] = [
     [255, 255, 255],
 ];
 
-const DEFAULT_GRADIENT_START: Rgb = [0x1a, 0x1a, 0x2e];
-const DEFAULT_GRADIENT_END: Rgb = [0xe9, 0x45, 0x60];
+pub const DEFAULT_GRADIENT_START: Rgb = [0x1a, 0x1a, 0x2e];
+pub const DEFAULT_GRADIENT_END: Rgb = [0xe9, 0x45, 0x60];
 
 /// Active drawing palette plus gradient editor state.
 #[derive(Debug, Clone)]

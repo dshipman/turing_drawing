@@ -64,6 +64,7 @@ impl Program {
             machines: vec![machine],
             itr_count: 0,
         };
+        prog.ensure_machine_ids();
         prog.reset();
         prog
     }
@@ -81,6 +82,7 @@ impl Program {
             machines: vec![parsed.machine],
             itr_count: 0,
         };
+        prog.ensure_machine_ids();
         prog.reset();
         Ok(prog)
     }
@@ -122,6 +124,7 @@ impl Program {
         self.num_symbols = num_symbols;
         let speeds: Vec<f32> = self.machines.iter().map(|m| m.speed).collect();
         let names: Vec<String> = self.machines.iter().map(|m| m.name.clone()).collect();
+        let ids: Vec<u64> = self.machines.iter().map(|m| m.id).collect();
         let n = self.machines.len().max(1);
         let (width, height) = (self.width, self.height);
         self.machines = (0..n)
@@ -131,12 +134,16 @@ impl Program {
             if let Some(speed) = speeds.get(i) {
                 machine.speed = *speed;
             }
+            if let Some(id) = ids.get(i) {
+                machine.id = *id;
+            }
             machine.name = names
                 .get(i)
                 .cloned()
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| default_machine_name(i));
         }
+        self.ensure_machine_ids();
         self.reset();
     }
 
@@ -150,11 +157,13 @@ impl Program {
         let speed = self.machines[index].speed;
         let active = self.machines[index].active;
         let name = self.machines[index].name.clone();
+        let id = self.machines[index].id;
         self.machines[index] =
             Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
         self.machines[index].speed = speed;
         self.machines[index].active = active;
         self.machines[index].name = name;
+        self.machines[index].id = id;
         self.reset();
         Ok(())
     }
@@ -220,6 +229,7 @@ impl Program {
             Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
         machine.name = default_machine_name(self.machines.len());
         self.machines.push(machine);
+        self.ensure_machine_ids();
         self.reset();
     }
 
@@ -259,12 +269,14 @@ impl Program {
         let parsed = Machine::from_string(s, self.width, self.height)?;
         let speed = self.machines[index].speed;
         let name = self.machines[index].name.clone();
+        let id = self.machines[index].id;
         if self.machines.len() == 1 {
             self.num_states = parsed.num_states;
             self.num_symbols = parsed.num_symbols;
             self.machines[0] = parsed.machine;
             self.machines[0].speed = speed;
             self.machines[0].name = name;
+            self.machines[0].id = id;
             self.reset();
             return Ok(());
         }
@@ -279,6 +291,7 @@ impl Program {
         self.machines[index] = parsed.machine;
         self.machines[index].speed = speed;
         self.machines[index].name = name;
+        self.machines[index].id = id;
         self.reset();
         Ok(())
     }
@@ -303,6 +316,25 @@ impl Program {
             self.itr_count += 1;
         }
     }
+
+    /// Assign ids to any machine that still has `id == 0`.
+    pub fn ensure_machine_ids(&mut self) {
+        let mut next = self.machines.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+        for machine in &mut self.machines {
+            if machine.id == 0 {
+                machine.id = next;
+                next += 1;
+            }
+        }
+    }
+
+    pub fn index_of_machine(&self, id: u64) -> Option<usize> {
+        self.machines.iter().position(|m| m.id == id)
+    }
+
+    pub fn machine_ids(&self) -> Vec<u64> {
+        self.machines.iter().map(|m| m.id).collect()
+    }
 }
 
 #[cfg(test)]
@@ -321,6 +353,7 @@ mod tests {
             speed: 0.0,
             active: true,
             name: String::new(),
+            id: 0,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -487,6 +520,22 @@ mod tests {
         assert_eq!(p.machines[0].y_pos, p.machines[0].start_y);
         assert_eq!(p.machines[1].x_pos, p.machines[1].start_x);
         assert_eq!(p.machines[1].y_pos, p.machines[1].start_y);
+    }
+
+    #[test]
+    fn randomize_and_add_preserve_distinct_machine_ids() {
+        let mut p = Program::new_random(2, 2);
+        let id0 = p.machines[0].id;
+        assert_ne!(id0, 0);
+        p.add_machine();
+        let id1 = p.machines[1].id;
+        assert_ne!(id0, id1);
+        p.randomize(2, 2);
+        assert_eq!(p.machines[0].id, id0);
+        assert_eq!(p.machines[1].id, id1);
+        p.remove_machine(1).unwrap();
+        assert_eq!(p.machines[0].id, id0);
+        assert_eq!(p.index_of_machine(id1), None);
     }
 
     #[test]

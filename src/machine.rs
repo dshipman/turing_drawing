@@ -61,6 +61,8 @@ pub struct Machine {
     pub active: bool,
     /// User-facing label. Empty falls back to [`default_machine_name`].
     pub name: String,
+    /// Stable id for per-machine keybindings. `0` means unassigned.
+    pub id: u64,
     /// Scheduling rounds spent at the current `speed` (for fractional rates).
     pub(crate) rounds_at_speed: u64,
     /// Whole steps already taken during `rounds_at_speed`.
@@ -96,6 +98,7 @@ impl Machine {
             speed: 0.0,
             active: true,
             name: String::new(),
+            id: 0,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -292,6 +295,7 @@ impl Machine {
             speed: 0.0,
             active: true,
             name: String::new(),
+            id: 0,
             rounds_at_speed: 0,
             steps_at_speed: 0,
         };

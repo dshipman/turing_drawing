@@ -38,6 +38,7 @@ pub enum Message {
     RgbChanged(RgbChannel, f32),
     #[allow(dead_code)]
     HexChanged(String),
+    BindClose,
 }
 
 /// Messages from the palette sidebar (kind, gradient hex fields, and picker).
@@ -154,6 +155,7 @@ impl ColorPicker {
                     Err(e) => Err(e),
                 }
             }
+            Message::BindClose => Ok(false),
         }
     }
 
@@ -193,7 +195,8 @@ impl ColorPicker {
             row![
                 chrome::label(label),
                 Space::new().width(Length::Fill),
-                chrome::compact_button("Close").on_press(Message::Close),
+                mouse_area(chrome::compact_button("Close").on_press(Message::Close))
+                    .on_right_press(Message::BindClose),
             ]
             .align_y(Alignment::Center),
             container(

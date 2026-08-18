@@ -15,18 +15,20 @@ use turing_drawing::chrome;
 use turing_drawing::color_picker::{self, ColorPicker, ControlsMessage, GradientEndpoint};
 use turing_drawing::drawing::{self, simulation_frame};
 use turing_drawing::gpu_raster::{self, RasterMode};
-use turing_drawing::palette::{fill_rgba_from_map, rgba_from_map, Palette, PaletteKind};
+use turing_drawing::palette::{
+    fill_rgba_from_map, parse_hex_rgb, rgb_to_hex, rgba_from_map, Palette, PaletteKind,
+};
 use turing_drawing::preset::{self, PresetInfo, PresetSort};
 use turing_drawing::program::{
-    default_machine_name, remap_index_after_reorder, step_rate, Program, DEFAULT_MAP_HEIGHT,
-    DEFAULT_MAP_WIDTH, DEFAULT_MUTATE_PERCENT, MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_MUTATE_PERCENT,
-    MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES,
-    MIN_SYMBOLS,
+    default_machine_name, remap_index_after_reorder, step_rate, Program, DEFAULT_MUTATE_PERCENT,
+    MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_MUTATE_PERCENT, MAX_STATES, MAX_SYMBOLS,
+    MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES, MIN_SYMBOLS,
+};
+use turing_drawing::settings::{
+    self, Action, BindTarget, PerformanceBindings, UserSettings, MAX_MAX_ITRS, MAX_REFRESH_HZ,
+    MIN_MAX_ITRS, MIN_REFRESH_HZ,
 };
 
-const DEFAULT_REFRESH_HZ: u32 = 60;
-const MIN_REFRESH_HZ: u32 = 1;
-const MAX_REFRESH_HZ: u32 = 240;
 const REFRESH_PRESETS: [RefreshPreset; 6] = [
     RefreshPreset(30),
     RefreshPreset(60),
@@ -35,9 +37,6 @@ const REFRESH_PRESETS: [RefreshPreset; 6] = [
     RefreshPreset(165),
     RefreshPreset(240),
 ];
-const DEFAULT_MAX_ITRS: u64 = 350_000;
-const MIN_MAX_ITRS: u64 = 1_000;
-const MAX_MAX_ITRS: u64 = 2_000_000;
 const CHUNK: usize = 5_000;
 /// Resume this long after the last resize during a fullscreen transition.
 const MODE_SWITCH_SETTLE: Duration = Duration::from_millis(100);
@@ -157,13 +156,19 @@ fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Mess
     }
     match event {
         Event::Keyboard(keyboard::Event::KeyPressed {
-            key: keyboard::Key::Named(named),
+            key,
+            modifiers,
+            repeat,
             ..
-        }) => match named {
-            key::Named::F11 => Some(Message::ToggleFullscreen),
-            key::Named::Escape => Some(Message::Escape),
-            _ => None,
-        },
+        }) => {
+            if repeat {
+                return None;
+            }
+            match &key {
+                keyboard::Key::Named(key::Named::Escape) => Some(Message::Escape),
+                _ => Some(Message::KeyPressed { key, modifiers }),
+            }
+        }
         _ => None,
     }
 }
@@ -218,6 +223,17 @@ struct App {
     picking_start: Option<usize>,
     /// Swallow the double-click that follows a start-position pick.
     suppress_drawing_only: bool,
+    settings: UserSettings,
+    performance_bindings: PerformanceBindings,
+    settings_open: bool,
+    settings_tab: SettingsTab,
+    capturing_action: Option<BindTarget>,
+    button_controls: Option<BindTarget>,
+    settings_width_text: String,
+    settings_height_text: String,
+    settings_refresh_text: String,
+    settings_gradient_start: String,
+    settings_gradient_end: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +241,12 @@ enum InspectorGroup {
     Canvas,
     Palette,
     Simulation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Defaults,
+    Keybindings,
 }
 
 #[derive(Debug, Clone)]
@@ -285,15 +307,51 @@ enum Message {
     DeletePreset(String),
     PresetSortChanged(PresetSort),
     ToggleInspectorGroup(InspectorGroup),
+    KeyPressed {
+        key: keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    },
+    OpenSettings,
+    CloseSettings,
+    SettingsTab(SettingsTab),
+    CaptureBinding(BindTarget),
+    OpenButtonControls(BindTarget),
+    CloseButtonControls,
+    ClearBinding,
+    SettingsIncStates,
+    SettingsDecStates,
+    SettingsIncSymbols,
+    SettingsDecSymbols,
+    SettingsResolutionPreset(usize, usize),
+    SettingsWidthText(String),
+    SettingsHeightText(String),
+    SettingsSpeed(f32),
+    SettingsRefreshPreset(u32),
+    SettingsRefreshText(String),
+    SettingsMaxItrs(f32),
+    SettingsRasterMode(RasterMode),
+    SettingsPalette(PaletteKind),
+    SettingsGradientStart(String),
+    SettingsGradientEnd(String),
 }
 
 impl App {
     fn new() -> (Self, Task<Message>) {
-        let num_states = 4;
-        let num_symbols = 3;
-        let program = Program::new_random(num_states, num_symbols);
+        let settings = UserSettings::load();
+        let defaults = settings.defaults.clone();
+        let num_states = defaults.num_states;
+        let num_symbols = defaults.num_symbols;
+        let program = Program::new_random_sized(
+            num_states,
+            num_symbols,
+            defaults.map_width,
+            defaults.map_height,
+        );
         let share_texts = vec![program.machine_encoding(0)];
-        let palette = Palette::classic();
+        let mut palette = Palette::classic();
+        let _ = palette.set_gradient_start_hex(defaults.gradient_start.clone(), num_symbols);
+        let _ = palette.set_gradient_end_hex(defaults.gradient_end.clone(), num_symbols);
+        palette.set_kind(defaults.palette_kind, num_symbols);
         let pixels = rgba_from_map(&program.map, &palette.colors);
         let frame = Handle::from_rgba(program.width as u32, program.height as u32, pixels.clone());
 
@@ -302,12 +360,12 @@ impl App {
                 program,
                 num_states,
                 num_symbols,
-                speed: 1.0,
-                refresh_hz: DEFAULT_REFRESH_HZ,
-                refresh_hz_text: DEFAULT_REFRESH_HZ.to_string(),
-                map_width_text: DEFAULT_MAP_WIDTH.to_string(),
-                map_height_text: DEFAULT_MAP_HEIGHT.to_string(),
-                max_itrs: DEFAULT_MAX_ITRS,
+                speed: defaults.speed,
+                refresh_hz: defaults.refresh_hz,
+                refresh_hz_text: defaults.refresh_hz.to_string(),
+                map_width_text: defaults.map_width.to_string(),
+                map_height_text: defaults.map_height.to_string(),
+                max_itrs: defaults.max_itrs,
                 share_texts,
                 status: String::new(),
                 pixels,
@@ -325,10 +383,21 @@ impl App {
                 palette_open: true,
                 simulation_open: true,
                 mode_switch_resume_at: None,
-                raster_mode: RasterMode::Gpu,
+                raster_mode: defaults.raster_mode,
                 mutate_percent: f32::from(DEFAULT_MUTATE_PERCENT),
                 picking_start: None,
                 suppress_drawing_only: false,
+                settings,
+                performance_bindings: PerformanceBindings::default(),
+                settings_open: false,
+                settings_tab: SettingsTab::Defaults,
+                capturing_action: None,
+                button_controls: None,
+                settings_width_text: defaults.map_width.to_string(),
+                settings_height_text: defaults.map_height.to_string(),
+                settings_refresh_text: defaults.refresh_hz.to_string(),
+                settings_gradient_start: defaults.gradient_start,
+                settings_gradient_end: defaults.gradient_end,
             },
             Task::none(),
         )
@@ -388,6 +457,167 @@ impl App {
         }
     }
 
+    fn persist_settings(&mut self) {
+        if let Err(e) = self.settings.save() {
+            self.status = format!("Could not save settings: {e}");
+        }
+    }
+
+    fn forget_machine_bindings(&mut self, id: u64) {
+        self.performance_bindings.clear_machine(id);
+        if self
+            .button_controls
+            .as_ref()
+            .is_some_and(|t| t.machine_id == Some(id))
+        {
+            self.button_controls = None;
+            self.capturing_action = None;
+        }
+    }
+
+    fn prune_machine_bindings(&mut self) {
+        self.performance_bindings
+            .retain_machine_ids(&self.program.machine_ids());
+        if let Some(target) = &self.button_controls {
+            if let Some(id) = target.machine_id {
+                if self.program.index_of_machine(id).is_none() {
+                    self.button_controls = None;
+                    self.capturing_action = None;
+                }
+            }
+        }
+    }
+
+    fn binding_for(&self, target: &BindTarget) -> Option<&settings::Keybinding> {
+        if target.is_performance() {
+            self.performance_bindings.binding_for(target)
+        } else {
+            self.settings.binding_for(target)
+        }
+    }
+
+    fn set_binding(&mut self, binding: settings::Keybinding) {
+        if binding.machine_id.is_some() {
+            self.performance_bindings.set_binding(binding);
+        } else {
+            self.settings.set_binding(binding);
+            self.persist_settings();
+        }
+    }
+
+    fn clear_binding(&mut self, target: &BindTarget) {
+        if target.is_performance() {
+            self.performance_bindings.clear_binding(target);
+        } else {
+            self.settings.clear_binding(target);
+            self.persist_settings();
+        }
+    }
+
+    fn match_any_binding(
+        &self,
+        key: &keyboard::Key,
+        modifiers: keyboard::Modifiers,
+    ) -> Option<&settings::Keybinding> {
+        self.performance_bindings
+            .match_binding(key, modifiers)
+            .or_else(|| self.settings.match_binding(key, modifiers))
+    }
+
+    fn target_label(&self, target: &BindTarget) -> String {
+        let machine_name = target.machine_id.and_then(|id| {
+            self.program
+                .index_of_machine(id)
+                .map(|i| self.program.machines[i].display_name(i))
+        });
+        target.label(machine_name.as_deref())
+    }
+
+    fn dispatch_binding(&mut self, binding: &settings::Keybinding) -> Task<Message> {
+        if let Some(id) = binding.machine_id {
+            let Some(index) = self.program.index_of_machine(id) else {
+                return Task::none();
+            };
+            return match binding.action {
+                Action::RandomizeMachine => self.update(Message::RandomizeMachine(index)),
+                Action::MutateMachine => self.update(Message::MutateMachine(index)),
+                Action::TogglePickStart => self.update(Message::TogglePickStart(index)),
+                Action::CopyShare => self.update(Message::CopyShare(index)),
+                Action::LoadShare => self.update(Message::LoadShare(index)),
+                Action::RemoveMachine => self.update(Message::RemoveMachine(index)),
+                _ => Task::none(),
+            };
+        }
+        if let Some(name) = &binding.preset_name {
+            return match binding.action {
+                Action::LoadPreset => self.update(Message::LoadPreset(name.clone())),
+                Action::DeletePreset => self.update(Message::DeletePreset(name.clone())),
+                _ => Task::none(),
+            };
+        }
+        match binding.action {
+            Action::Random => self.update(Message::Random),
+            Action::Mutate => self.update(Message::Mutate),
+            Action::Restart => self.update(Message::Restart),
+            Action::OpenPresets => self.update(Message::OpenPresetBrowser),
+            Action::OpenSettings => self.update(Message::OpenSettings),
+            Action::ToggleFullscreen => self.update(Message::ToggleFullscreen),
+            Action::AddMachine => self.update(Message::AddMachine),
+            Action::IncStates => self.update(Message::IncStates),
+            Action::DecStates => self.update(Message::DecStates),
+            Action::IncSymbols => self.update(Message::IncSymbols),
+            Action::DecSymbols => self.update(Message::DecSymbols),
+            Action::ToggleCanvas => {
+                self.update(Message::ToggleInspectorGroup(InspectorGroup::Canvas))
+            }
+            Action::TogglePalette => {
+                self.update(Message::ToggleInspectorGroup(InspectorGroup::Palette))
+            }
+            Action::ToggleSimulation => {
+                self.update(Message::ToggleInspectorGroup(InspectorGroup::Simulation))
+            }
+            Action::CloseMachineDetails => self.update(Message::CloseMachineDetails),
+            Action::StorePreset => self.update(Message::StorePreset),
+            Action::ClosePresetBrowser => self.update(Message::ClosePresetBrowser),
+            Action::CloseSettings => self.update(Message::CloseSettings),
+            Action::CloseColorPicker => {
+                self.color_picker.close();
+                Task::none()
+            }
+            Action::SettingsTabDefaults => self.update(Message::SettingsTab(SettingsTab::Defaults)),
+            Action::SettingsTabKeybindings => {
+                self.update(Message::SettingsTab(SettingsTab::Keybindings))
+            }
+            _ => Task::none(),
+        }
+    }
+
+    fn sync_settings_drafts(&mut self) {
+        let d = &self.settings.defaults;
+        self.settings_width_text = d.map_width.to_string();
+        self.settings_height_text = d.map_height.to_string();
+        self.settings_refresh_text = d.refresh_hz.to_string();
+        self.settings_gradient_start = d.gradient_start.clone();
+        self.settings_gradient_end = d.gradient_end.clone();
+    }
+
+    fn try_apply_settings_resolution(&mut self) {
+        match (
+            parse_map_dim(&self.settings_width_text, "Width"),
+            parse_map_dim(&self.settings_height_text, "Height"),
+        ) {
+            (Ok(width), Ok(height)) => {
+                self.settings.defaults.map_width = width;
+                self.settings.defaults.map_height = height;
+                self.persist_settings();
+                self.status.clear();
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                self.status = e;
+            }
+        }
+    }
+
     fn apply_loaded_program(&mut self, program: Program, label: &str) {
         self.program = program;
         self.num_states = self.program.num_states;
@@ -399,6 +629,7 @@ impl App {
         self.picking_start = None;
         self.sync_share_texts();
         self.status = label.to_string();
+        self.prune_machine_bindings();
         self.refresh_frame();
     }
 
@@ -556,22 +787,28 @@ impl App {
                 self.refresh_frame();
                 Task::none()
             }
-            Message::RemoveMachine(i) => match self.program.remove_machine(i) {
-                Ok(()) => {
-                    self.adjust_selection_after_remove(i);
-                    self.sync_share_texts();
-                    self.status = format!(
-                        "Removed machine ({} remaining); program reset",
-                        self.program.machines.len()
-                    );
-                    self.refresh_frame();
-                    Task::none()
+            Message::RemoveMachine(i) => {
+                let id = self.program.machines.get(i).map(|m| m.id);
+                match self.program.remove_machine(i) {
+                    Ok(()) => {
+                        if let Some(id) = id {
+                            self.forget_machine_bindings(id);
+                        }
+                        self.adjust_selection_after_remove(i);
+                        self.sync_share_texts();
+                        self.status = format!(
+                            "Removed machine ({} remaining); program reset",
+                            self.program.machines.len()
+                        );
+                        self.refresh_frame();
+                        Task::none()
+                    }
+                    Err(e) => {
+                        self.status = e;
+                        Task::none()
+                    }
                 }
-                Err(e) => {
-                    self.status = e;
-                    Task::none()
-                }
-            },
+            }
             Message::RandomizeMachine(i) => match self.program.randomize_machine(i) {
                 Ok(()) => {
                     self.sync_share_texts();
@@ -780,6 +1017,20 @@ impl App {
                 Task::none()
             }
             Message::Escape => {
+                if self.button_controls.is_some() {
+                    self.button_controls = None;
+                    self.capturing_action = None;
+                    return Task::none();
+                }
+                if self.capturing_action.is_some() {
+                    self.capturing_action = None;
+                    self.status = "Cancelled keybinding capture".into();
+                    return Task::none();
+                }
+                if self.settings_open {
+                    self.settings_open = false;
+                    return Task::none();
+                }
                 if self.picking_start.is_some() {
                     self.picking_start = None;
                     self.status = "Cancelled start placement".into();
@@ -861,6 +1112,8 @@ impl App {
             }
             Message::OpenPresetBrowser => {
                 self.selected_machine = None;
+                self.settings_open = false;
+                self.capturing_action = None;
                 self.preset_browser_open = true;
                 self.refresh_preset_list();
                 Task::none()
@@ -873,27 +1126,38 @@ impl App {
                 self.preset_name = name;
                 Task::none()
             }
-            Message::StorePreset => {
-                match self.program.to_preset(&self.preset_name) {
-                    Ok(preset) => match preset::save_preset(&preset) {
+            Message::StorePreset => match self.program.to_preset(&self.preset_name) {
+                Ok(mut preset) => {
+                    preset.performance_bindings = self
+                        .performance_bindings
+                        .to_preset_bindings(&self.program.machine_ids());
+                    match preset::save_preset(&preset) {
                         Ok(name) => {
                             self.status = format!("Stored preset \"{name}\"");
                             self.refresh_preset_list();
                         }
                         Err(e) => self.status = format!("Store failed: {e}"),
-                    },
-                    Err(e) => self.status = format!("Store failed: {e}"),
+                    }
+                    Task::none()
                 }
-                Task::none()
+                Err(e) => {
+                    self.status = format!("Store failed: {e}");
+                    Task::none()
+                }
             }
             Message::LoadPreset(name) => match preset::load_preset(&name) {
                 Ok(preset) => match Program::from_preset(&preset) {
                     Ok(program) => {
                         let n = program.machines.len();
+                        let perf = PerformanceBindings::from_preset_bindings(
+                            &preset.performance_bindings,
+                            &program.machine_ids(),
+                        );
                         self.apply_loaded_program(
                             program,
                             &format!("Loaded preset \"{name}\" ({n} machine(s))"),
                         );
+                        self.performance_bindings = perf;
                         Task::none()
                     }
                     Err(e) => {
@@ -908,6 +1172,16 @@ impl App {
             },
             Message::DeletePreset(name) => match preset::delete_preset(&name) {
                 Ok(()) => {
+                    self.settings.clear_preset(&name);
+                    if self
+                        .button_controls
+                        .as_ref()
+                        .is_some_and(|t| t.preset_name.as_deref() == Some(name.as_str()))
+                    {
+                        self.button_controls = None;
+                        self.capturing_action = None;
+                    }
+                    self.persist_settings();
                     self.status = format!("Deleted preset \"{name}\"");
                     self.refresh_preset_list();
                     Task::none()
@@ -927,6 +1201,204 @@ impl App {
                     InspectorGroup::Canvas => self.canvas_open = !self.canvas_open,
                     InspectorGroup::Palette => self.palette_open = !self.palette_open,
                     InspectorGroup::Simulation => self.simulation_open = !self.simulation_open,
+                }
+                Task::none()
+            }
+            Message::KeyPressed { key, modifiers } => {
+                if let Some(target) = self.capturing_action.clone() {
+                    if let Some(binding) =
+                        settings::Keybinding::from_event(target.clone(), &key, modifiers)
+                    {
+                        let label = binding.display();
+                        let name = self.target_label(&target);
+                        self.set_binding(binding);
+                        self.capturing_action = None;
+                        if target.is_performance() {
+                            self.status = format!(
+                                "Performance binding (stored with presets): {name}: {label}"
+                            );
+                        } else {
+                            self.status = format!("Bound {name}: {label}");
+                        }
+                    }
+                    return Task::none();
+                }
+                if self.button_controls.is_some()
+                    && matches!(key, keyboard::Key::Named(key::Named::Enter))
+                {
+                    self.button_controls = None;
+                    return Task::none();
+                }
+                if let Some(binding) = self.match_any_binding(&key, modifiers).cloned() {
+                    return self.dispatch_binding(&binding);
+                }
+                Task::none()
+            }
+            Message::OpenSettings => {
+                self.preset_browser_open = false;
+                self.settings_open = true;
+                self.capturing_action = None;
+                self.sync_settings_drafts();
+                Task::none()
+            }
+            Message::CloseSettings => {
+                self.settings_open = false;
+                self.capturing_action = None;
+                Task::none()
+            }
+            Message::SettingsTab(tab) => {
+                self.settings_tab = tab;
+                if tab != SettingsTab::Keybindings {
+                    self.capturing_action = None;
+                }
+                Task::none()
+            }
+            Message::CaptureBinding(target) => {
+                self.capturing_action = Some(target.clone());
+                self.status = format!("Press a key for {}", self.target_label(&target));
+                Task::none()
+            }
+            Message::OpenButtonControls(target) => {
+                self.button_controls = Some(target.clone());
+                self.capturing_action = Some(target);
+                self.status.clear();
+                Task::none()
+            }
+            Message::CloseButtonControls => {
+                self.button_controls = None;
+                self.capturing_action = None;
+                Task::none()
+            }
+            Message::ClearBinding => {
+                if let Some(target) = self.button_controls.clone() {
+                    self.clear_binding(&target);
+                    self.capturing_action = None;
+                    if target.is_performance() {
+                        self.status = format!(
+                            "Cleared performance binding for {}",
+                            self.target_label(&target)
+                        );
+                    } else {
+                        self.status = format!("Cleared binding for {}", self.target_label(&target));
+                    }
+                }
+                Task::none()
+            }
+            Message::SettingsIncStates => {
+                if self.settings.defaults.num_states < MAX_STATES {
+                    self.settings.defaults.num_states += 1;
+                    self.persist_settings();
+                }
+                Task::none()
+            }
+            Message::SettingsDecStates => {
+                if self.settings.defaults.num_states > MIN_STATES {
+                    self.settings.defaults.num_states -= 1;
+                    self.persist_settings();
+                }
+                Task::none()
+            }
+            Message::SettingsIncSymbols => {
+                if self.settings.defaults.num_symbols < MAX_SYMBOLS {
+                    self.settings.defaults.num_symbols += 1;
+                    self.persist_settings();
+                }
+                Task::none()
+            }
+            Message::SettingsDecSymbols => {
+                if self.settings.defaults.num_symbols > MIN_SYMBOLS {
+                    self.settings.defaults.num_symbols -= 1;
+                    self.persist_settings();
+                }
+                Task::none()
+            }
+            Message::SettingsResolutionPreset(width, height) => {
+                self.settings.defaults.map_width = width;
+                self.settings.defaults.map_height = height;
+                self.settings_width_text = width.to_string();
+                self.settings_height_text = height.to_string();
+                self.persist_settings();
+                self.status.clear();
+                Task::none()
+            }
+            Message::SettingsWidthText(text) => {
+                self.settings_width_text = text;
+                self.try_apply_settings_resolution();
+                Task::none()
+            }
+            Message::SettingsHeightText(text) => {
+                self.settings_height_text = text;
+                self.try_apply_settings_resolution();
+                Task::none()
+            }
+            Message::SettingsSpeed(speed) => {
+                self.settings.defaults.speed = speed.clamp(0.0, 1.0);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsRefreshPreset(hz) => {
+                let hz = hz.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ);
+                self.settings.defaults.refresh_hz = hz;
+                self.settings_refresh_text = hz.to_string();
+                self.persist_settings();
+                self.status.clear();
+                Task::none()
+            }
+            Message::SettingsRefreshText(text) => {
+                self.settings_refresh_text = text;
+                match parse_refresh_hz(&self.settings_refresh_text) {
+                    Ok(hz) => {
+                        self.settings.defaults.refresh_hz = hz;
+                        self.persist_settings();
+                        self.status.clear();
+                    }
+                    Err(e) => {
+                        self.status = e;
+                    }
+                }
+                Task::none()
+            }
+            Message::SettingsMaxItrs(value) => {
+                let value = value.round() as u64;
+                self.settings.defaults.max_itrs = value.clamp(MIN_MAX_ITRS, MAX_MAX_ITRS);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsRasterMode(mode) => {
+                self.settings.defaults.raster_mode = mode;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsPalette(kind) => {
+                self.settings.defaults.palette_kind = kind;
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsGradientStart(hex) => {
+                self.settings_gradient_start = hex.clone();
+                match parse_hex_rgb(&hex) {
+                    Ok(rgb) => {
+                        self.settings.defaults.gradient_start = rgb_to_hex(rgb);
+                        self.persist_settings();
+                        self.status.clear();
+                    }
+                    Err(e) => {
+                        self.status = format!("Start colour: {e}");
+                    }
+                }
+                Task::none()
+            }
+            Message::SettingsGradientEnd(hex) => {
+                self.settings_gradient_end = hex.clone();
+                match parse_hex_rgb(&hex) {
+                    Ok(rgb) => {
+                        self.settings.defaults.gradient_end = rgb_to_hex(rgb);
+                        self.persist_settings();
+                        self.status.clear();
+                    }
+                    Err(e) => {
+                        self.status = format!("End colour: {e}");
+                    }
                 }
                 Task::none()
             }
@@ -1145,21 +1617,36 @@ impl App {
         .height(Length::Fill)
         .style(chrome::window);
 
-        if self.preset_browser_open {
-            return stack([content.into(), self.preset_browser()])
+        let mut layers = vec![content.into()];
+        if self.settings_open {
+            layers.push(self.settings_overlay());
+        } else if self.preset_browser_open {
+            layers.push(self.preset_browser());
+        }
+        if self.button_controls.is_some() {
+            layers.push(self.button_controls_overlay());
+        }
+        if layers.len() == 1 {
+            layers.pop().unwrap()
+        } else {
+            stack(layers)
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .into();
+                .into()
         }
-
-        content.into()
     }
 
     fn toolbar(&self) -> Element<'_, Message> {
         container(
             row![
-                chrome::compact_button("Random").on_press(Message::Random),
-                chrome::compact_button("Mutate").on_press(Message::Mutate),
+                bindable(
+                    chrome::compact_button("Random").on_press(Message::Random),
+                    BindTarget::global(Action::Random),
+                ),
+                bindable(
+                    chrome::compact_button("Mutate").on_press(Message::Mutate),
+                    BindTarget::global(Action::Mutate),
+                ),
                 chrome::dim("Mutate %"),
                 slider(
                     f32::from(MIN_MUTATE_PERCENT)..=f32::from(MAX_MUTATE_PERCENT),
@@ -1170,10 +1657,23 @@ impl App {
                 .width(100)
                 .style(chrome::slider_style),
                 chrome::dim(format!("{:.0}%", self.mutate_percent)).width(36),
-                chrome::compact_button("Restart").on_press(Message::Restart),
-                chrome::compact_button("Presets").on_press(Message::OpenPresetBrowser),
+                bindable(
+                    chrome::compact_button("Restart").on_press(Message::Restart),
+                    BindTarget::global(Action::Restart),
+                ),
+                bindable(
+                    chrome::compact_button("Presets").on_press(Message::OpenPresetBrowser),
+                    BindTarget::global(Action::OpenPresets),
+                ),
+                bindable(
+                    chrome::compact_button("Settings").on_press(Message::OpenSettings),
+                    BindTarget::global(Action::OpenSettings),
+                ),
                 Space::new().width(Length::Fill),
-                chrome::compact_button("Fullscreen").on_press(Message::ToggleFullscreen),
+                bindable(
+                    chrome::compact_button("Fullscreen").on_press(Message::ToggleFullscreen),
+                    BindTarget::global(Action::ToggleFullscreen),
+                ),
             ]
             .spacing(6)
             .align_y(Alignment::Center),
@@ -1212,6 +1712,7 @@ impl App {
                 .push(chrome::dim("Active"))
                 .push(machine_active_toggler(i, active));
 
+            let id = self.program.machines[i].id;
             let picking = self.picking_start == Some(i);
             let set_start = if picking {
                 chrome::accent_button("Set start")
@@ -1220,9 +1721,15 @@ impl App {
             }
             .on_press(Message::TogglePickStart(i));
             let actions = row![
-                chrome::compact_button("Randomise").on_press(Message::RandomizeMachine(i)),
-                chrome::compact_button("Mutate").on_press(Message::MutateMachine(i)),
-                set_start,
+                bindable(
+                    chrome::compact_button("Randomise").on_press(Message::RandomizeMachine(i)),
+                    BindTarget::machine(Action::RandomizeMachine, id),
+                ),
+                bindable(
+                    chrome::compact_button("Mutate").on_press(Message::MutateMachine(i)),
+                    BindTarget::machine(Action::MutateMachine, id),
+                ),
+                bindable(set_start, BindTarget::machine(Action::TogglePickStart, id)),
             ]
             .spacing(4)
             .align_y(Alignment::Center);
@@ -1248,13 +1755,16 @@ impl App {
                     left: 10.0,
                 }),
                 Space::new().width(Length::Fill),
-                container(chrome::compact_button("Add machine").on_press(Message::AddMachine),)
-                    .padding(iced::Padding {
-                        top: 4.0,
-                        right: 8.0,
-                        bottom: 4.0,
-                        left: 0.0,
-                    }),
+                container(bindable(
+                    chrome::compact_button("Add machine").on_press(Message::AddMachine),
+                    BindTarget::global(Action::AddMachine),
+                ),)
+                .padding(iced::Padding {
+                    top: 4.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                    left: 0.0,
+                }),
             ]
             .align_y(Alignment::Center)
             .width(Length::Fill),
@@ -1287,18 +1797,21 @@ impl App {
                 "CANVAS",
                 self.canvas_open,
                 Message::ToggleInspectorGroup(InspectorGroup::Canvas),
+                BindTarget::global(Action::ToggleCanvas),
                 self.canvas_group(),
             ))
             .push(collapsible(
                 "PALETTE",
                 self.palette_open,
                 Message::ToggleInspectorGroup(InspectorGroup::Palette),
+                BindTarget::global(Action::TogglePalette),
                 self.palette_group(),
             ))
             .push(collapsible(
                 "SIMULATION",
                 self.simulation_open,
                 Message::ToggleInspectorGroup(InspectorGroup::Simulation),
+                BindTarget::global(Action::ToggleSimulation),
                 self.simulation_group(),
             ));
 
@@ -1318,11 +1831,27 @@ impl App {
         column![
             inspector_row(
                 "States",
-                stepper(self.num_states, Message::DecStates, Message::IncStates),
+                stepper(
+                    self.num_states,
+                    Message::DecStates,
+                    Message::IncStates,
+                    Some((
+                        BindTarget::global(Action::DecStates),
+                        BindTarget::global(Action::IncStates),
+                    )),
+                ),
             ),
             inspector_row(
                 "Symbols",
-                stepper(self.num_symbols, Message::DecSymbols, Message::IncSymbols,),
+                stepper(
+                    self.num_symbols,
+                    Message::DecSymbols,
+                    Message::IncSymbols,
+                    Some((
+                        BindTarget::global(Action::DecSymbols),
+                        BindTarget::global(Action::IncSymbols),
+                    )),
+                ),
             ),
             inspector_row(
                 "Size",
@@ -1366,6 +1895,9 @@ impl App {
                 ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
                 ControlsMessage::GradientStartChanged(hex) => Message::GradientStartChanged(hex),
                 ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
+                ControlsMessage::Picker(color_picker::Message::BindClose) => {
+                    Message::OpenButtonControls(BindTarget::global(Action::CloseColorPicker))
+                }
                 ControlsMessage::Picker(m) => Message::ColorPicker(m),
             },
         )
@@ -1451,6 +1983,7 @@ impl App {
             .unwrap_or("");
         let can_remove = self.program.machines.len() > 1;
 
+        let id = machine.id;
         let mut remove = chrome::danger_button("Remove");
         if can_remove {
             remove = remove.on_press(Message::RemoveMachine(index));
@@ -1459,7 +1992,10 @@ impl App {
         let header = row![
             chrome::dim(machine.display_name(index)),
             Space::new().width(Length::Fill),
-            chrome::compact_button("Close").on_press(Message::CloseMachineDetails),
+            bindable(
+                chrome::compact_button("Close").on_press(Message::CloseMachineDetails),
+                BindTarget::global(Action::CloseMachineDetails),
+            ),
         ]
         .padding([6, 8])
         .align_y(Alignment::Center);
@@ -1485,9 +2021,15 @@ impl App {
                         .on_input(move |s| Message::ShareChanged(index, s))
                         .width(Length::Fill),
                     row![
-                        chrome::compact_button("Copy").on_press(Message::CopyShare(index)),
-                        chrome::compact_button("Load").on_press(Message::LoadShare(index)),
-                        remove,
+                        bindable(
+                            chrome::compact_button("Copy").on_press(Message::CopyShare(index)),
+                            BindTarget::machine(Action::CopyShare, id),
+                        ),
+                        bindable(
+                            chrome::compact_button("Load").on_press(Message::LoadShare(index)),
+                            BindTarget::machine(Action::LoadShare, id),
+                        ),
+                        bindable(remove, BindTarget::machine(Action::RemoveMachine, id)),
                     ]
                     .spacing(6)
                     .align_y(Alignment::Center),
@@ -1552,9 +2094,16 @@ impl App {
                         ]
                         .spacing(2)
                         .width(Length::Fill),
-                        chrome::compact_button("Load").on_press(Message::LoadPreset(name_load)),
-                        chrome::danger_button("Delete")
-                            .on_press(Message::DeletePreset(name_delete)),
+                        bindable(
+                            chrome::compact_button("Load")
+                                .on_press(Message::LoadPreset(name_load.clone())),
+                            BindTarget::preset(Action::LoadPreset, name_load),
+                        ),
+                        bindable(
+                            chrome::danger_button("Delete")
+                                .on_press(Message::DeletePreset(name_delete.clone())),
+                            BindTarget::preset(Action::DeletePreset, name_delete),
+                        ),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -1567,7 +2116,10 @@ impl App {
                 row![
                     chrome::value("Presets").size(16),
                     Space::new().width(Length::Fill),
-                    chrome::compact_button("Close").on_press(Message::ClosePresetBrowser),
+                    bindable(
+                        chrome::compact_button("Close").on_press(Message::ClosePresetBrowser),
+                        BindTarget::global(Action::ClosePresetBrowser),
+                    ),
                 ]
                 .align_y(Alignment::Center),
                 chrome::dim("Store rules, starts, speeds, and canvas size. Load replaces the current machines."),
@@ -1575,7 +2127,10 @@ impl App {
                     chrome::field("Preset name", &self.preset_name)
                         .on_input(Message::PresetNameChanged)
                         .width(Length::Fill),
-                    chrome::compact_button("Store").on_press(Message::StorePreset),
+                    bindable(
+                        chrome::compact_button("Store").on_press(Message::StorePreset),
+                        BindTarget::global(Action::StorePreset),
+                    ),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -1609,21 +2164,337 @@ impl App {
                 .on_press(Message::ClosePresetBrowser),
         )
     }
+
+    fn settings_overlay(&self) -> Element<'_, Message> {
+        let defaults_tab = bindable(
+            if self.settings_tab == SettingsTab::Defaults {
+                chrome::accent_button("Defaults")
+            } else {
+                chrome::compact_button("Defaults")
+            }
+            .on_press(Message::SettingsTab(SettingsTab::Defaults)),
+            BindTarget::global(Action::SettingsTabDefaults),
+        );
+        let keys_tab = bindable(
+            if self.settings_tab == SettingsTab::Keybindings {
+                chrome::accent_button("Keybindings")
+            } else {
+                chrome::compact_button("Keybindings")
+            }
+            .on_press(Message::SettingsTab(SettingsTab::Keybindings)),
+            BindTarget::global(Action::SettingsTabKeybindings),
+        );
+
+        let body: Element<'_, Message> = match self.settings_tab {
+            SettingsTab::Defaults => self.settings_defaults_tab(),
+            SettingsTab::Keybindings => self.settings_keybindings_tab(),
+        };
+
+        let panel = container(
+            column![
+                row![
+                    chrome::value("Settings").size(16),
+                    Space::new().width(Length::Fill),
+                    bindable(
+                        chrome::compact_button("Close").on_press(Message::CloseSettings),
+                        BindTarget::global(Action::CloseSettings),
+                    ),
+                ]
+                .align_y(Alignment::Center),
+                row![defaults_tab, keys_tab]
+                    .spacing(6)
+                    .align_y(Alignment::Center),
+                scrollable(body)
+                    .style(chrome::scrollable_style)
+                    .height(Length::Fixed(360.0))
+                    .width(Length::Fill),
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(560)
+        .style(chrome::overlay_panel);
+
+        opaque(
+            mouse_area(center(opaque(panel)).style(chrome::scrim)).on_press(Message::CloseSettings),
+        )
+    }
+
+    fn settings_defaults_tab(&self) -> Element<'_, Message> {
+        let d = &self.settings.defaults;
+        let mut palette_block = column![inspector_row(
+            "Palette",
+            chrome::decorate_pick_list(
+                pick_list(
+                    PaletteKind::ALL,
+                    Some(d.palette_kind),
+                    Message::SettingsPalette,
+                )
+                .width(Length::Fill),
+            ),
+        )]
+        .spacing(6);
+        if d.palette_kind == PaletteKind::Gradient {
+            palette_block = palette_block
+                .push(inspector_row(
+                    "Start",
+                    chrome::field("#RRGGBB", &self.settings_gradient_start)
+                        .on_input(Message::SettingsGradientStart)
+                        .width(Length::Fill),
+                ))
+                .push(inspector_row(
+                    "End",
+                    chrome::field("#RRGGBB", &self.settings_gradient_end)
+                        .on_input(Message::SettingsGradientEnd)
+                        .width(Length::Fill),
+                ));
+        }
+
+        column![
+            chrome::dim("CANVAS"),
+            inspector_row(
+                "States",
+                stepper(
+                    d.num_states,
+                    Message::SettingsDecStates,
+                    Message::SettingsIncStates,
+                    None,
+                ),
+            ),
+            inspector_row(
+                "Symbols",
+                stepper(
+                    d.num_symbols,
+                    Message::SettingsDecSymbols,
+                    Message::SettingsIncSymbols,
+                    None,
+                ),
+            ),
+            inspector_row(
+                "Size",
+                chrome::decorate_pick_list(
+                    pick_list(
+                        RESOLUTION_PRESETS,
+                        RESOLUTION_PRESETS.iter().copied().find(|preset| {
+                            preset.width == d.map_width && preset.height == d.map_height
+                        }),
+                        |preset: ResolutionPreset| {
+                            Message::SettingsResolutionPreset(preset.width, preset.height)
+                        },
+                    )
+                    .placeholder("Custom")
+                    .width(Length::Fill),
+                ),
+            ),
+            inspector_row(
+                "",
+                row![
+                    chrome::field("W", &self.settings_width_text)
+                        .on_input(Message::SettingsWidthText)
+                        .width(Length::Fill),
+                    chrome::dim("×").width(14).align_x(Alignment::Center),
+                    chrome::field("H", &self.settings_height_text)
+                        .on_input(Message::SettingsHeightText)
+                        .width(Length::Fill),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            chrome::hrule(),
+            chrome::dim("PALETTE"),
+            palette_block,
+            chrome::hrule(),
+            chrome::dim("SIMULATION"),
+            inspector_row(
+                "Speed",
+                row![
+                    slider(0.0..=1.0, d.speed, Message::SettingsSpeed)
+                        .step(0.01_f32)
+                        .style(chrome::slider_style),
+                    chrome::dim(format!("{:.2}", d.speed))
+                        .width(36)
+                        .align_x(Alignment::End),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            inspector_row(
+                "Refresh",
+                chrome::decorate_pick_list(
+                    pick_list(
+                        REFRESH_PRESETS,
+                        REFRESH_PRESETS
+                            .iter()
+                            .copied()
+                            .find(|preset| preset.0 == d.refresh_hz),
+                        |preset: RefreshPreset| Message::SettingsRefreshPreset(preset.0),
+                    )
+                    .placeholder("Custom")
+                    .width(Length::Fill),
+                ),
+            ),
+            inspector_row(
+                "",
+                row![
+                    chrome::field("Hz", &self.settings_refresh_text)
+                        .on_input(Message::SettingsRefreshText)
+                        .width(Length::Fill),
+                    chrome::dim("Hz").width(22),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            inspector_row(
+                "Max itrs",
+                row![
+                    slider(
+                        MIN_MAX_ITRS as f32..=MAX_MAX_ITRS as f32,
+                        d.max_itrs as f32,
+                        Message::SettingsMaxItrs,
+                    )
+                    .step(1_000.0_f32)
+                    .style(chrome::slider_style),
+                    chrome::dim(d.max_itrs.to_string())
+                        .width(64)
+                        .align_x(Alignment::End),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            ),
+            inspector_row(
+                "Raster",
+                chrome::decorate_pick_list(
+                    pick_list(
+                        RasterMode::ALL,
+                        Some(d.raster_mode),
+                        Message::SettingsRasterMode,
+                    )
+                    .width(Length::Fill),
+                ),
+            ),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    fn settings_keybindings_tab(&self) -> Element<'_, Message> {
+        let mut list = column![].spacing(8);
+        for action in Action::GLOBAL {
+            let target = BindTarget::global(action);
+            let combo = self
+                .binding_for(&target)
+                .map(settings::Keybinding::display)
+                .unwrap_or_else(|| "Not set".into());
+            let capturing = self.capturing_action.as_ref() == Some(&target);
+            let set_btn = if capturing {
+                chrome::accent_button("Press a key…")
+            } else {
+                chrome::compact_button("Set")
+            }
+            .on_press(Message::CaptureBinding(target));
+            list = list.push(
+                row![
+                    chrome::value(action.label()).width(Length::Fill),
+                    chrome::dim(combo).width(140).align_x(Alignment::End),
+                    set_btn,
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        column![
+            chrome::dim(
+                "Global shortcuts only. Per-machine performance bindings are set from machine buttons and saved with presets."
+            ),
+            list,
+        ]
+        .spacing(10)
+        .into()
+    }
+
+    fn button_controls_overlay(&self) -> Element<'_, Message> {
+        let Some(target) = &self.button_controls else {
+            return Space::new().into();
+        };
+        let title = self.target_label(target);
+        let combo = self
+            .binding_for(target)
+            .map(settings::Keybinding::display)
+            .unwrap_or_else(|| "Not set".into());
+        let capturing = self.capturing_action.as_ref() == Some(target);
+        let set_btn = if capturing {
+            chrome::accent_button("Press a key…")
+        } else {
+            chrome::compact_button("Set")
+        }
+        .on_press(Message::CaptureBinding(target.clone()));
+        let bound = self.binding_for(target).is_some();
+        let hint = if target.is_performance() {
+            "Performance bindings are stored when you save a preset."
+        } else {
+            "Press a key to bind. Return closes after binding; Escape cancels."
+        };
+        let mut clear = chrome::danger_button("Clear");
+        if bound {
+            clear = clear.on_press(Message::ClearBinding);
+        }
+
+        let panel = container(
+            column![
+                row![
+                    chrome::value(title).size(16),
+                    Space::new().width(Length::Fill),
+                    chrome::compact_button("Close").on_press(Message::CloseButtonControls),
+                ]
+                .align_y(Alignment::Center),
+                chrome::dim(if target.is_performance() {
+                    "Performance binding"
+                } else {
+                    "Current shortcut"
+                }),
+                chrome::value(combo),
+                chrome::dim(hint),
+                row![set_btn, clear].spacing(8).align_y(Alignment::Center),
+            ]
+            .spacing(10),
+        )
+        .padding(16)
+        .width(360)
+        .style(chrome::overlay_panel);
+
+        opaque(
+            mouse_area(center(opaque(panel)).style(chrome::scrim))
+                .on_press(Message::CloseButtonControls),
+        )
+    }
+}
+
+fn bindable<'a>(
+    button: iced::widget::button::Button<'a, Message>,
+    target: BindTarget,
+) -> Element<'a, Message> {
+    mouse_area(button)
+        .on_right_press(Message::OpenButtonControls(target))
+        .into()
 }
 
 fn collapsible<'a>(
     title: &'a str,
     open: bool,
     toggle: Message,
+    bind: BindTarget,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let chevron = if open { "▾" } else { "▸" };
-    let header = chrome::header_button(
-        row![chrome::dim(chevron), chrome::dim(title)]
-            .spacing(6)
-            .align_y(Alignment::Center),
-    )
-    .on_press(toggle);
+    let header = bindable(
+        chrome::header_button(
+            row![chrome::dim(chevron), chrome::dim(title)]
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .on_press(toggle),
+        bind,
+    );
 
     let mut col = column![header];
     if open {
@@ -1650,13 +2521,24 @@ fn inspector_row<'a>(
     .into()
 }
 
-fn stepper(value: usize, dec: Message, inc: Message) -> Element<'static, Message> {
+fn stepper(
+    value: usize,
+    dec: Message,
+    inc: Message,
+    binds: Option<(BindTarget, BindTarget)>,
+) -> Element<'static, Message> {
+    let minus = chrome::compact_button("−").on_press(dec);
+    let plus = chrome::compact_button("+").on_press(inc);
+    let (minus, plus): (Element<'static, Message>, Element<'static, Message>) = match binds {
+        Some((dec_bind, inc_bind)) => (bindable(minus, dec_bind), bindable(plus, inc_bind)),
+        None => (minus.into(), plus.into()),
+    };
     row![
-        chrome::compact_button("−").on_press(dec),
+        minus,
         chrome::value(value.to_string())
             .width(28)
             .align_x(Alignment::Center),
-        chrome::compact_button("+").on_press(inc),
+        plus,
     ]
     .spacing(4)
     .align_y(Alignment::Center)
