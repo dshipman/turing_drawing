@@ -7,6 +7,7 @@
 use rand::seq::SliceRandom;
 use rand::Rng;
 
+use crate::dirty::DirtyRect;
 use crate::palette::{write_rgb, Palette};
 
 pub const DEFAULT_MAP_WIDTH: usize = 512;
@@ -137,14 +138,20 @@ impl Machine {
         num_states: usize,
         width: i32,
         height: i32,
-    ) {
+    ) -> Option<DirtyRect> {
         self.rounds_at_speed += 1;
         let due = (step_rate(self.speed) * self.rounds_at_speed as f64).floor() as u64;
         let steps = due.saturating_sub(self.steps_at_speed);
         self.steps_at_speed = due;
+        let mut dirty: Option<DirtyRect> = None;
         for _ in 0..steps {
-            self.step(map, canvas, num_states, width, height);
+            let wrote = self.step(map, canvas, num_states, width, height);
+            dirty = Some(match dirty {
+                Some(rect) => rect.union(wrote),
+                None => wrote,
+            });
         }
+        dirty
     }
 
     pub fn reset(&mut self) {
@@ -193,7 +200,9 @@ impl Machine {
         num_states: usize,
         width: i32,
         height: i32,
-    ) {
+    ) -> DirtyRect {
+        let wrote_x = self.x_pos;
+        let wrote_y = self.y_pos;
         let idx_map = (width * self.y_pos + self.x_pos) as usize;
         let sy = map[idx_map] as usize;
         let st = self.state as usize;
@@ -205,11 +214,7 @@ impl Machine {
 
         self.state = next_st;
         map[idx_map] = write_sy;
-        write_rgb(
-            canvas,
-            idx_map,
-            self.palette.colors[write_sy as usize],
-        );
+        write_rgb(canvas, idx_map, self.palette.colors[write_sy as usize]);
 
         // Keep original action mapping (LEFT/RIGHT names are swapped vs motion)
         match ac {
@@ -239,6 +244,7 @@ impl Machine {
             }
             _ => panic!("invalid action: {ac}"),
         }
+        DirtyRect::from_cell(wrote_x, wrote_y)
     }
 
     /// Share string: `numStates,numSymbols,startX,startY,` then flat table values.

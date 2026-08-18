@@ -2,6 +2,7 @@
 
 pub mod chrome;
 pub mod color_picker;
+pub mod dirty;
 pub mod drawing;
 pub mod gpu_raster;
 pub mod machine;

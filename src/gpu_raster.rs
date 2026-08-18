@@ -7,6 +7,8 @@ use iced::widget::Shader;
 use iced::Rectangle;
 use serde::{Deserialize, Serialize};
 
+use crate::dirty::DirtyRect;
+
 /// How the canvas is shown on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -38,12 +40,7 @@ struct ContainLayout {
     drawn_h: f32,
 }
 
-fn contain_layout(
-    map_w: f32,
-    map_h: f32,
-    widget_w: f32,
-    widget_h: f32,
-) -> Option<ContainLayout> {
+fn contain_layout(map_w: f32, map_h: f32, widget_w: f32, widget_h: f32) -> Option<ContainLayout> {
     if map_w <= 0.0 || map_h <= 0.0 || widget_w <= 0.0 || widget_h <= 0.0 {
         return None;
     }
@@ -107,11 +104,15 @@ pub fn canvas_shader<'a, Message>(
     canvas: &'a [u8],
     width: u32,
     height: u32,
+    dirty: Option<DirtyRect>,
+    revision: u64,
 ) -> Shader<Message, RasterProgram<'a>> {
     iced::widget::shader(RasterProgram {
         canvas,
         width,
         height,
+        dirty,
+        revision,
     })
     .width(iced::Length::Fill)
     .height(iced::Length::Fill)
@@ -121,6 +122,8 @@ pub struct RasterProgram<'a> {
     canvas: &'a [u8],
     width: u32,
     height: u32,
+    dirty: Option<DirtyRect>,
+    revision: u64,
 }
 
 impl<Message> shader::Program<Message> for RasterProgram<'_> {
@@ -137,6 +140,8 @@ impl<Message> shader::Program<Message> for RasterProgram<'_> {
             canvas: self.canvas,
             width: self.width.max(1),
             height: self.height.max(1),
+            dirty: self.dirty,
+            revision: self.revision,
         }
     }
 }
@@ -148,6 +153,8 @@ pub struct RasterPrimitive {
     canvas: *const [u8],
     width: u32,
     height: u32,
+    dirty: Option<DirtyRect>,
+    revision: u64,
 }
 
 unsafe impl Send for RasterPrimitive {}
@@ -158,6 +165,8 @@ impl std::fmt::Debug for RasterPrimitive {
         f.debug_struct("RasterPrimitive")
             .field("width", &self.width)
             .field("height", &self.height)
+            .field("dirty", &self.dirty)
+            .field("revision", &self.revision)
             .finish()
     }
 }
@@ -188,6 +197,7 @@ pub struct RasterPipeline {
     tex_size: (u32, u32),
     /// Reusable row-padding scratch buffer, resized only when canvas size changes.
     padded: Vec<u8>,
+    last_uploaded_revision: Option<u64>,
 }
 
 impl RasterPipeline {
@@ -251,9 +261,52 @@ impl RasterPipeline {
         } else {
             self.padded.clear();
         }
+        self.last_uploaded_revision = None;
     }
 
-    fn upload_map(&mut self, queue: &wgpu::Queue, canvas: &[u8], width: u32, height: u32) {
+    fn upload_map_region(
+        &mut self,
+        queue: &wgpu::Queue,
+        canvas: &[u8],
+        tex_width: u32,
+        rect: DirtyRect,
+    ) {
+        let row_bytes_full = tex_width as usize * 4;
+        let bpr = padded_bytes_per_row(rect.width);
+        let bytes = if rect.x == 0 && rect.width == tex_width && bpr == rect.width * 4 {
+            let start = rect.y as usize * row_bytes_full;
+            let end = start + rect.height as usize * row_bytes_full;
+            &canvas[start..end]
+        } else {
+            pad_rows_region_into(canvas, tex_width, rect, bpr, &mut self.padded);
+            &self.padded
+        };
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.map_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: rect.x,
+                    y: rect.y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bpr),
+                rows_per_image: Some(rect.height),
+            },
+            wgpu::Extent3d {
+                width: rect.width,
+                height: rect.height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    fn upload_map_full(&mut self, queue: &wgpu::Queue, canvas: &[u8], width: u32, height: u32) {
         let bpr = padded_bytes_per_row(width);
         let bytes: &[u8] = if bpr == width * 4 {
             canvas
@@ -375,6 +428,7 @@ impl shader::Pipeline for RasterPipeline {
             bind_group,
             tex_size: (1, 1),
             padded: Vec::new(),
+            last_uploaded_revision: None,
         }
     }
 }
@@ -394,32 +448,37 @@ impl shader::Primitive for RasterPrimitive {
         let height = self.height;
         let canvas = unsafe { &*self.canvas };
         pipeline.resize_map(device, width, height);
-        pipeline.upload_map(queue, canvas, width, height);
+        if pipeline.last_uploaded_revision != Some(self.revision) {
+            let full = DirtyRect::full(width, height);
+            let dirty = self.dirty.unwrap_or(full);
+            if dirty == full {
+                pipeline.upload_map_full(queue, canvas, width, height);
+            } else {
+                pipeline.upload_map_region(queue, canvas, width, dirty);
+            }
+            pipeline.last_uploaded_revision = Some(self.revision);
+        }
 
         let scale = viewport.scale_factor();
         let widget_w = (bounds.width * scale).max(1.0);
         let widget_h = (bounds.height * scale).max(1.0);
 
-        let uniforms = if let Some(cl) = contain_layout(
-            width as f32,
-            height as f32,
-            widget_w,
-            widget_h,
-        ) {
-            Uniforms {
-                origin: [cl.origin_x, cl.origin_y, 0.0, 0.0],
-                inv_scale: [cl.inv_scale, cl.drawn_w, cl.drawn_h, 0.0],
-                map_dims: [width as f32, height as f32, widget_w, widget_h],
-                letterbox: [0.0, 0.0, 0.0, 1.0],
-            }
-        } else {
-            Uniforms {
-                origin: [0.0; 4],
-                inv_scale: [0.0; 4],
-                map_dims: [0.0, 0.0, widget_w, widget_h],
-                letterbox: [0.0, 0.0, 0.0, 1.0],
-            }
-        };
+        let uniforms =
+            if let Some(cl) = contain_layout(width as f32, height as f32, widget_w, widget_h) {
+                Uniforms {
+                    origin: [cl.origin_x, cl.origin_y, 0.0, 0.0],
+                    inv_scale: [cl.inv_scale, cl.drawn_w, cl.drawn_h, 0.0],
+                    map_dims: [width as f32, height as f32, widget_w, widget_h],
+                    letterbox: [0.0, 0.0, 0.0, 1.0],
+                }
+            } else {
+                Uniforms {
+                    origin: [0.0; 4],
+                    inv_scale: [0.0; 4],
+                    map_dims: [0.0, 0.0, widget_w, widget_h],
+                    letterbox: [0.0, 0.0, 0.0, 1.0],
+                }
+            };
         pipeline.upload_uniforms(queue, &uniforms);
     }
 
@@ -503,6 +562,28 @@ fn pad_rows_into(canvas: &[u8], width: u32, height: u32, bpr: u32, out: &mut Vec
     }
 }
 
+fn pad_rows_region_into(
+    canvas: &[u8],
+    full_width: u32,
+    rect: DirtyRect,
+    bpr: u32,
+    out: &mut Vec<u8>,
+) {
+    let needed = (bpr * rect.height) as usize;
+    if out.len() < needed {
+        out.resize(needed, 0);
+    }
+    let full_row = full_width as usize * 4;
+    let row_bytes = rect.width as usize * 4;
+    let x_off = rect.x as usize * 4;
+    let bpr = bpr as usize;
+    for row in 0..rect.height as usize {
+        let src = (rect.y as usize + row) * full_row + x_off;
+        let dst = row * bpr;
+        out[dst..dst + row_bytes].copy_from_slice(&canvas[src..src + row_bytes]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,8 +620,8 @@ mod tests {
     #[test]
     fn gpu_lookup_matches_canvas_when_widget_matches_map() {
         let canvas = vec![
-            255, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 255, 0, 255, 0, 0, 255, 255,
-            255, 255, 0, 255, 0, 255, 255, 255, 255, 0, 255, 255,
+            255, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255,
+            255, 0, 255, 0, 255, 255, 255, 255, 0, 255, 255,
         ];
         let (width, height) = (4usize, 2usize);
         for y in 0..height {

@@ -35,42 +35,82 @@ const RESOLUTION_PRESETS: [(&str, usize, usize); 18] = [
 
 struct Timings {
     sim: Duration,
-    raster: Duration,
-    clone: Duration,
+    raster_full: Duration,
+    raster_dirty: Duration,
+    clone_full: Duration,
+    clone_dirty: Duration,
     steps: u64,
 }
 
 fn time_frames(program: &mut Program, frames: u32) -> Timings {
     let mut sim = Duration::ZERO;
-    let mut raster = Duration::ZERO;
-    let mut clone_t = Duration::ZERO;
+    let mut raster_full = Duration::ZERO;
+    let mut raster_dirty = Duration::ZERO;
+    let mut clone_full = Duration::ZERO;
+    let mut clone_dirty = Duration::ZERO;
     let mut steps = 0u64;
+    let mut dirty_copy = Vec::new();
+    let row_bytes = program.width * 4;
 
     for _ in 0..frames {
         let start_itr = program.itr_count;
         let t0 = Instant::now();
+        let mut frame_dirty: Option<turing_drawing::dirty::DirtyRect> = None;
         let mut remaining = DEFAULT_MAX_ITRS;
         while remaining > 0 {
             let chunk = CHUNK.min(remaining as usize);
-            program.update(chunk);
+            let chunk_dirty = program.update(chunk);
+            if let Some(rect) = chunk_dirty {
+                frame_dirty = Some(match frame_dirty {
+                    Some(acc) => acc.union(rect),
+                    None => rect,
+                });
+            }
             remaining = remaining.saturating_sub(chunk as u64);
         }
         sim += t0.elapsed();
         steps += program.itr_count.saturating_sub(start_itr);
 
         let t1 = Instant::now();
-        let pixels = program.canvas.clone();
-        raster += t1.elapsed();
+        let pixels_full = program.canvas.clone();
+        raster_full += t1.elapsed();
+
+        let t1b = Instant::now();
+        if let Some(rect) = frame_dirty {
+            let need = rect.width as usize * rect.height as usize * 4;
+            if dirty_copy.len() < need {
+                dirty_copy.resize(need, 0);
+            }
+            let mut out = 0usize;
+            let x_off = rect.x as usize * 4;
+            for y in rect.y as usize..(rect.y + rect.height) as usize {
+                let src = y * row_bytes + x_off;
+                let n = rect.width as usize * 4;
+                dirty_copy[out..out + n].copy_from_slice(&program.canvas[src..src + n]);
+                out += n;
+            }
+            std::hint::black_box(&dirty_copy[..need]);
+        }
+        raster_dirty += t1b.elapsed();
 
         let t2 = Instant::now();
-        std::hint::black_box(pixels.clone());
-        clone_t += t2.elapsed();
+        std::hint::black_box(pixels_full.clone());
+        clone_full += t2.elapsed();
+
+        let t2b = Instant::now();
+        if let Some(rect) = frame_dirty {
+            let n = rect.width as usize * rect.height as usize * 4;
+            std::hint::black_box(dirty_copy[..n].to_vec());
+        }
+        clone_dirty += t2b.elapsed();
     }
 
     Timings {
         sim,
-        raster,
-        clone: clone_t,
+        raster_full,
+        raster_dirty,
+        clone_full,
+        clone_dirty,
         steps,
     }
 }
@@ -83,19 +123,33 @@ fn print_row(name: &str, width: usize, height: usize, machines: usize, t: &Timin
     let cells = width * height;
     let f = f64::from(frames);
     let sim = ms(t.sim) / f;
-    let raster = ms(t.raster) / f;
-    let clone = ms(t.clone) / f;
-    let total = sim + raster + clone;
+    let raster_full = ms(t.raster_full) / f;
+    let raster_dirty = ms(t.raster_dirty) / f;
+    let clone_full = ms(t.clone_full) / f;
+    let clone_dirty = ms(t.clone_dirty) / f;
+    let total_full = sim + raster_full + clone_full;
+    let total_dirty = sim + raster_dirty + clone_dirty;
     let steps = t.steps as f64 / f;
     println!(
-        "{name:<28} {width:>4}×{height:<4} {machines:>3} {cells:>10} {steps:>10.0} {sim:>8.2} {raster:>8.2} {clone:>8.2} {total:>8.2}"
+        "{name:<28} {width:>4}×{height:<4} {machines:>3} {cells:>10} {steps:>10.0} {sim:>7.2} {raster_full:>7.2} {raster_dirty:>7.2} {clone_full:>7.2} {clone_dirty:>7.2} {total_full:>8.2} {total_dirty:>8.2}"
     );
 }
 
 fn header() {
     println!(
-        "{:<28} {:>9} {:>3} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8}",
-        "name", "canvas", "m", "cells", "steps", "sim ms", "rast ms", "clone ms", "total"
+        "{:<28} {:>9} {:>3} {:>10} {:>10} {:>7} {:>7} {:>7} {:>7} {:>7} {:>8} {:>8}",
+        "name",
+        "canvas",
+        "m",
+        "cells",
+        "steps",
+        "sim",
+        "fullcp",
+        "dirtycp",
+        "fullcln",
+        "dirtycln",
+        "fulltot",
+        "dirtytot"
     );
 }
 

@@ -13,6 +13,7 @@ use iced::{
 
 use turing_drawing::chrome;
 use turing_drawing::color_picker::{self, ColorPicker, ControlsMessage, GradientEndpoint};
+use turing_drawing::dirty::DirtyRect;
 use turing_drawing::drawing::{self, simulation_frame};
 use turing_drawing::gpu_raster::{self, RasterMode};
 use turing_drawing::palette::{parse_hex_rgb, rgb_to_hex, Palette, PaletteKind};
@@ -195,6 +196,10 @@ struct App {
     status: String,
     /// Cached RGBA frame; rebuilt when the map changes.
     pixels: Vec<u8>,
+    /// Pending region to upload on the GPU raster path.
+    gpu_dirty: Option<DirtyRect>,
+    /// Revision paired with `gpu_dirty`.
+    gpu_dirty_revision: u64,
     frame: Handle,
     /// When true, only the drawing is shown (controls and share encodings hidden).
     drawing_only: bool,
@@ -398,6 +403,8 @@ impl App {
                 share_texts,
                 status: String::new(),
                 pixels,
+                gpu_dirty: Some(DirtyRect::full(program.width as u32, program.height as u32)),
+                gpu_dirty_revision: program.canvas_revision,
                 frame,
                 drawing_only: false,
                 color_picker: ColorPicker::new(),
@@ -1619,10 +1626,20 @@ impl App {
                 break;
             }
             let chunk = CHUNK.min(remaining as usize);
-            self.program.update(chunk);
+            let _ = self.program.update(chunk);
         }
 
         self.refresh_frame();
+    }
+
+    fn sync_gpu_dirty(&mut self) {
+        if let Some(rect) = self.program.take_canvas_dirty() {
+            self.gpu_dirty = Some(match self.gpu_dirty {
+                Some(acc) => acc.union(rect),
+                None => rect,
+            });
+            self.gpu_dirty_revision = self.program.canvas_revision;
+        }
     }
 
     fn sync_resolution_text(&mut self) {
@@ -1684,6 +1701,7 @@ impl App {
     }
 
     fn refresh_frame(&mut self) {
+        self.sync_gpu_dirty();
         if self.raster_mode != RasterMode::Cpu {
             return;
         }
@@ -1743,6 +1761,8 @@ impl App {
                 &self.program.canvas,
                 self.program.width as u32,
                 self.program.height as u32,
+                self.gpu_dirty,
+                self.gpu_dirty_revision,
             )
             .into(),
             RasterMode::Cpu => simulation_frame(self.frame.clone()).into(),

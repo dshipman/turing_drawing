@@ -1,5 +1,6 @@
 //! Shared tape plus one or more machines that step on it in order.
 
+use crate::dirty::DirtyRect;
 use crate::machine::{validate_map_size, wrap_pos, Machine};
 use crate::palette::{empty_canvas, fill_rgba_from_map, Palette};
 use crate::tape::{self, TapeInit};
@@ -35,6 +36,8 @@ pub struct Program {
     pub canvas: Vec<u8>,
     /// Colours used when Restart / Reseed fills the canvas from the tape.
     pub canvas_palette: Palette,
+    pub canvas_revision: u64,
+    pub(crate) canvas_dirty: Option<DirtyRect>,
     pub machines: Vec<Machine>,
     pub itr_count: u64,
     /// How [`Self::reset`] fills the tape. Empty (all zeros) is the default.
@@ -74,6 +77,8 @@ impl Program {
             map: vec![0; cells],
             canvas: empty_canvas(cells),
             canvas_palette,
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -98,6 +103,8 @@ impl Program {
             map: vec![0; cells],
             canvas: empty_canvas(cells),
             canvas_palette,
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![parsed.machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -120,6 +127,7 @@ impl Program {
             self.canvas.resize(self.map.len() * 4, 0);
         }
         fill_rgba_from_map(&self.map, &mut self.canvas, &self.canvas_palette.colors);
+        self.mark_canvas_dirty(DirtyRect::full(self.width as u32, self.height as u32));
         for machine in &mut self.machines {
             machine.reset();
         }
@@ -371,25 +379,48 @@ impl Program {
 
     /// Run `num_itrs` interleaved rounds. Each machine accrues its floating-point
     /// step rate and takes any whole steps that are due (default: one per round).
-    pub fn update(&mut self, num_itrs: usize) {
+    pub fn update(&mut self, num_itrs: usize) -> Option<DirtyRect> {
         let width = self.width as i32;
         let height = self.height as i32;
         let num_states = self.num_states;
+        let mut dirty: Option<DirtyRect> = None;
 
         for _ in 0..num_itrs {
             for machine in self.machines.iter_mut() {
                 if machine.active {
-                    machine.take_scheduled_steps(
+                    let wrote = machine.take_scheduled_steps(
                         &mut self.map,
                         &mut self.canvas,
                         num_states,
                         width,
                         height,
                     );
+                    if let Some(rect) = wrote {
+                        dirty = Some(match dirty {
+                            Some(acc) => acc.union(rect),
+                            None => rect,
+                        });
+                    }
                 }
             }
             self.itr_count += 1;
         }
+        if let Some(rect) = dirty {
+            self.mark_canvas_dirty(rect);
+        }
+        dirty
+    }
+
+    fn mark_canvas_dirty(&mut self, rect: DirtyRect) {
+        self.canvas_dirty = Some(match self.canvas_dirty {
+            Some(acc) => acc.union(rect),
+            None => rect,
+        });
+        self.canvas_revision = self.canvas_revision.wrapping_add(1);
+    }
+
+    pub fn take_canvas_dirty(&mut self) -> Option<DirtyRect> {
+        self.canvas_dirty.take()
     }
 
     /// Assign ids to any machine that still has `id == 0`.
@@ -452,6 +483,8 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
             canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![fixed_machine(table, start_x, start_y)],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -641,6 +674,8 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
             canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![m0, m1],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -735,6 +770,8 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
             canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![fast, slow, normal, mid],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -762,6 +799,8 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
             canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![active, inactive],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -808,6 +847,8 @@ mod tests {
             map: vec![0; 80],
             canvas: empty_canvas(80),
             canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![fixed_machine(vec![0, 1, ACTION_LEFT], 9, 0)],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -1095,6 +1136,8 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
             canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
             machines: vec![m0, m1],
             itr_count: 0,
             tape_init: TapeInit::default(),
