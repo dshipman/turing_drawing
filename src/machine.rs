@@ -7,6 +7,8 @@
 use rand::seq::SliceRandom;
 use rand::Rng;
 
+use crate::palette::{write_rgb, Palette};
+
 pub const DEFAULT_MAP_WIDTH: usize = 512;
 pub const DEFAULT_MAP_HEIGHT: usize = 512;
 pub const MIN_MAP_SIZE: usize = 64;
@@ -63,6 +65,8 @@ pub struct Machine {
     pub name: String,
     /// Stable id for per-machine keybindings. `0` means unassigned.
     pub id: u64,
+    /// Colours baked into the canvas when this machine writes a symbol.
+    pub palette: Palette,
     /// Scheduling rounds spent at the current `speed` (for fractional rates).
     pub(crate) rounds_at_speed: u64,
     /// Whole steps already taken during `rounds_at_speed`.
@@ -99,6 +103,7 @@ impl Machine {
             active: true,
             name: String::new(),
             id: 0,
+            palette: Palette::classic(),
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -128,6 +133,7 @@ impl Machine {
     pub fn take_scheduled_steps(
         &mut self,
         map: &mut [i32],
+        canvas: &mut [u8],
         num_states: usize,
         width: i32,
         height: i32,
@@ -137,7 +143,7 @@ impl Machine {
         let steps = due.saturating_sub(self.steps_at_speed);
         self.steps_at_speed = due;
         for _ in 0..steps {
-            self.step(map, num_states, width, height);
+            self.step(map, canvas, num_states, width, height);
         }
     }
 
@@ -178,8 +184,16 @@ impl Machine {
         }
     }
 
-    /// One read / write / move on the shared tape.
-    pub fn step(&mut self, map: &mut [i32], num_states: usize, width: i32, height: i32) {
+    /// One read / write / move on the shared tape. The written symbol is stored
+    /// on the tape; the canvas stores this machine's current RGB for that symbol.
+    pub fn step(
+        &mut self,
+        map: &mut [i32],
+        canvas: &mut [u8],
+        num_states: usize,
+        width: i32,
+        height: i32,
+    ) {
         let idx_map = (width * self.y_pos + self.x_pos) as usize;
         let sy = map[idx_map] as usize;
         let st = self.state as usize;
@@ -191,6 +205,11 @@ impl Machine {
 
         self.state = next_st;
         map[idx_map] = write_sy;
+        write_rgb(
+            canvas,
+            idx_map,
+            self.palette.colors[write_sy as usize],
+        );
 
         // Keep original action mapping (LEFT/RIGHT names are swapped vs motion)
         match ac {
@@ -296,6 +315,7 @@ impl Machine {
             active: true,
             name: String::new(),
             id: 0,
+            palette: Palette::classic(),
             rounds_at_speed: 0,
             steps_at_speed: 0,
         };

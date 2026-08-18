@@ -91,8 +91,8 @@ impl ColorPicker {
         self.hex = rgb_to_hex(rgb);
     }
 
-    /// Apply a picker message. `Ok(true)` means the palette changed and the
-    /// drawing frame should be rebuilt. `Err` is a parse error for the status line.
+    /// Apply a picker message. `Ok(true)` means the palette colours changed.
+    /// `Err` is a parse error for the status line.
     pub fn update(
         &mut self,
         message: Message,

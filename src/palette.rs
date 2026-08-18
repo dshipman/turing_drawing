@@ -125,6 +125,24 @@ impl Palette {
         }
     }
 
+    /// Snapshot kind and gradient endpoints for presets.
+    pub fn to_spec(&self) -> PaletteSpec {
+        PaletteSpec {
+            kind: self.kind,
+            gradient_start: self.gradient_start_hex.clone(),
+            gradient_end: self.gradient_end_hex.clone(),
+        }
+    }
+
+    /// Rebuild a palette from a saved spec.
+    pub fn from_spec(spec: &PaletteSpec, num_symbols: usize) -> Self {
+        let mut palette = Self::classic();
+        let _ = palette.set_gradient_start_hex(spec.gradient_start.clone(), num_symbols);
+        let _ = palette.set_gradient_end_hex(spec.gradient_end.clone(), num_symbols);
+        palette.set_kind(spec.kind, num_symbols);
+        palette
+    }
+
     /// Rebuild `colors` from the current kind / gradient endpoints.
     ///
     /// Named palettes (except Classic) pick evenly across the full source
@@ -202,6 +220,35 @@ impl Palette {
     }
 }
 
+/// Serializable palette snapshot. Colour tables are rebuilt with `num_symbols`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PaletteSpec {
+    #[serde(default)]
+    pub kind: PaletteKind,
+    #[serde(default = "default_spec_gradient_start")]
+    pub gradient_start: String,
+    #[serde(default = "default_spec_gradient_end")]
+    pub gradient_end: String,
+}
+
+fn default_spec_gradient_start() -> String {
+    rgb_to_hex(DEFAULT_GRADIENT_START)
+}
+
+fn default_spec_gradient_end() -> String {
+    rgb_to_hex(DEFAULT_GRADIENT_END)
+}
+
+impl Default for PaletteSpec {
+    fn default() -> Self {
+        Self {
+            kind: PaletteKind::Classic,
+            gradient_start: default_spec_gradient_start(),
+            gradient_end: default_spec_gradient_end(),
+        }
+    }
+}
+
 /// Spread `num_symbols` slots across a fixed source palette.
 /// Unused slots copy the last source colour.
 fn sample_palette(source: &[Rgb; MAX_SYMBOLS], num_symbols: usize) -> [Rgb; MAX_SYMBOLS] {
@@ -267,13 +314,33 @@ pub fn rgba_from_map(map: &[i32], colors: &[Rgb; MAX_SYMBOLS]) -> Vec<u8> {
 pub fn fill_rgba_from_map(map: &[i32], pixels: &mut [u8], colors: &[Rgb; MAX_SYMBOLS]) {
     debug_assert_eq!(pixels.len(), map.len() * 4);
     for (i, &sy) in map.iter().enumerate() {
-        let c = colors[sy as usize];
-        let o = i * 4;
-        pixels[o] = c[0];
-        pixels[o + 1] = c[1];
-        pixels[o + 2] = c[2];
-        pixels[o + 3] = 255;
+        write_rgb(pixels, i, colors[sy as usize]);
     }
+}
+
+/// Opaque RGBA length for a symbol map of `cells` entries.
+pub fn rgba_len(cells: usize) -> usize {
+    cells * 4
+}
+
+/// Allocate a zeroed RGBA canvas for `cells` tape cells.
+pub fn empty_canvas(cells: usize) -> Vec<u8> {
+    vec![0u8; rgba_len(cells)]
+}
+
+/// Write an opaque RGB triple into `pixels` at cell `idx`.
+pub fn write_rgb(pixels: &mut [u8], idx: usize, rgb: Rgb) {
+    let o = idx * 4;
+    pixels[o] = rgb[0];
+    pixels[o + 1] = rgb[1];
+    pixels[o + 2] = rgb[2];
+    pixels[o + 3] = 255;
+}
+
+/// Read the RGB triple stored at cell `idx`.
+pub fn rgb_at(pixels: &[u8], idx: usize) -> Rgb {
+    let o = idx * 4;
+    [pixels[o], pixels[o + 1], pixels[o + 2]]
 }
 
 #[cfg(test)]
@@ -384,6 +451,20 @@ mod tests {
     }
 
     #[test]
+    fn spec_roundtrip_restores_kind_and_gradient() {
+        let mut p = Palette::classic();
+        p.set_kind(PaletteKind::Gradient, 4);
+        p.set_gradient_start_hex("#010203".into(), 4).unwrap();
+        p.set_gradient_end_hex("#f0f1f2".into(), 4).unwrap();
+        let spec = p.to_spec();
+        let q = Palette::from_spec(&spec, 4);
+        assert_eq!(q.kind, PaletteKind::Gradient);
+        assert_eq!(q.colors, p.colors);
+        assert_eq!(q.gradient_start, [1, 2, 3]);
+        assert_eq!(q.gradient_end, [0xf0, 0xf1, 0xf2]);
+    }
+
+    #[test]
     fn fill_rgba_writes_palette_and_opaque_alpha() {
         let colors = CLASSIC;
         let map = [0, 2, 1];
@@ -393,5 +474,10 @@ mod tests {
         assert_eq!(&pixels[4..8], &[255, 255, 255, 255]);
         assert_eq!(&pixels[8..12], &[0, 0, 0, 255]);
         assert_eq!(rgba_from_map(&map, &colors), pixels);
+        assert_eq!(rgb_at(&pixels, 1), [255, 255, 255]);
+        write_rgb(&mut pixels, 1, [1, 2, 3]);
+        assert_eq!(rgb_at(&pixels, 1), [1, 2, 3]);
+        assert_eq!(rgba_len(3), 12);
+        assert_eq!(empty_canvas(2).len(), 8);
     }
 }

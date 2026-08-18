@@ -11,11 +11,12 @@ use crate::machine::{
     DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED, MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_STATES,
     MIN_SYMBOLS,
 };
+use crate::palette::{empty_canvas, Palette, PaletteSpec};
 use crate::program::Program;
 use crate::settings::PresetPerformanceBinding;
 use crate::tape::TapeInit;
 
-const PRESET_VERSION: u32 = 3;
+const PRESET_VERSION: u32 = 4;
 const MIN_PRESET_VERSION: u32 = 1;
 const PRESETS_SUBDIR: &str = "presets";
 
@@ -30,6 +31,9 @@ pub struct PresetMachine {
     #[serde(default)]
     pub name: String,
     pub table: Vec<i32>,
+    /// Per-machine drawing palette. Missing in older files (Classic).
+    #[serde(default)]
+    pub palette: PaletteSpec,
 }
 
 fn default_active() -> bool {
@@ -119,6 +123,7 @@ impl Program {
                     active: m.active,
                     name: m.name.clone(),
                     table: m.table.clone(),
+                    palette: m.palette.to_spec(),
                 })
                 .collect(),
             performance_bindings: Vec::new(),
@@ -156,6 +161,7 @@ impl Program {
                     active: m.active,
                     name,
                     id: 0,
+                    palette: Palette::from_spec(&m.palette, preset.num_symbols),
                     rounds_at_speed: 0,
                     steps_at_speed: 0,
                 }
@@ -164,12 +170,18 @@ impl Program {
 
         let mut tape_init = preset.tape_init.clone();
         tape_init.sanitize();
+        let canvas_palette = machines
+            .first()
+            .map(|m| m.palette.clone())
+            .unwrap_or_else(Palette::classic);
         let mut prog = Self {
             num_states: preset.num_states,
             num_symbols: preset.num_symbols,
             width,
             height,
             map: vec![0; width * height],
+            canvas: empty_canvas(width * height),
+            canvas_palette,
             machines,
             itr_count: 0,
             tape_init,
@@ -454,6 +466,7 @@ mod tests {
             active: true,
             name: String::new(),
             id: 0,
+            palette: Palette::classic(),
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -477,6 +490,8 @@ mod tests {
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
+            canvas_palette: Palette::classic(),
             machines: vec![m0.clone(), m1.clone()],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -525,6 +540,7 @@ mod tests {
                 active: true,
                 name: String::new(),
                 table: vec![0, 1, 0, 0, 1, 0],
+                palette: PaletteSpec::default(),
             }],
             performance_bindings: Vec::new(),
             tape_init: TapeInit::default(),
@@ -720,6 +736,7 @@ mod tests {
                 active: true,
                 name: String::new(),
                 table: vec![0, 1, 0, 0, 1, 0],
+                palette: PaletteSpec::default(),
             }],
             performance_bindings: Vec::new(),
             tape_init: TapeInit::default(),
@@ -771,6 +788,61 @@ mod tests {
         let q = Program::from_preset(&preset).unwrap();
         assert_eq!(q.tape_init.kind, TapeInitKind::Empty);
         assert!(q.map.iter().all(|&s| s == 0));
+        assert_eq!(
+            q.machines[0].palette.kind,
+            crate::palette::PaletteKind::Classic
+        );
+    }
+
+    #[test]
+    fn machine_palette_roundtrips_in_preset() {
+        let mut p = Program::new_random(2, 4);
+        p.machines[0]
+            .palette
+            .set_kind(crate::palette::PaletteKind::Ocean, 4);
+        p.machines[0]
+            .palette
+            .set_gradient_start_hex("#112233".into(), 4)
+            .unwrap();
+        p.machines[0]
+            .palette
+            .set_gradient_end_hex("#aabbcc".into(), 4)
+            .unwrap();
+
+        let preset = p.to_preset("ocean walker").unwrap();
+        assert_eq!(preset.version, PRESET_VERSION);
+        assert_eq!(
+            preset.machines[0].palette.kind,
+            crate::palette::PaletteKind::Ocean
+        );
+        assert_eq!(preset.machines[0].palette.gradient_start, "#112233");
+        assert_eq!(preset.machines[0].palette.gradient_end, "#aabbcc");
+
+        let q = Program::from_preset(&preset).unwrap();
+        assert_eq!(
+            q.machines[0].palette.kind,
+            crate::palette::PaletteKind::Ocean
+        );
+        assert_eq!(q.machines[0].palette.colors, p.machines[0].palette.colors);
+        assert_eq!(q.machines[0].palette.gradient_start, [0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn old_json_without_machine_palette_loads_classic() {
+        let json = r#"{
+            "version": 3,
+            "name": "legacy palette",
+            "num_states": 1,
+            "num_symbols": 2,
+            "machines": [{"start_x": 0, "start_y": 0, "speed": 0.0, "table": [0, 1, 0, 0, 1, 0]}]
+        }"#;
+        let preset: Preset = serde_json::from_str(json).unwrap();
+        assert_eq!(preset.machines[0].palette, PaletteSpec::default());
+        let q = Program::from_preset(&preset).unwrap();
+        assert_eq!(
+            q.machines[0].palette.kind,
+            crate::palette::PaletteKind::Classic
+        );
     }
 
     #[test]

@@ -6,12 +6,11 @@
 
 use std::time::{Duration, Instant};
 
-use turing_drawing::palette::{fill_rgba_from_map, Palette};
 use turing_drawing::preset::{self, list_presets, load_preset, sort_preset_infos, PresetSort};
 use turing_drawing::program::Program;
+use turing_drawing::settings::DEFAULT_MAX_ITRS;
 
 const CHUNK: usize = 5_000;
-const DEFAULT_MAX_ITRS: u64 = 350_000;
 const FRAMES: u32 = 4;
 const RESOLUTION_PRESETS: [(&str, usize, usize); 18] = [
     ("512 × 512", 512, 512),
@@ -42,18 +41,12 @@ struct Timings {
 }
 
 fn time_frames(program: &mut Program, frames: u32) -> Timings {
-    let colors = Palette::classic().colors;
-    let mut pixels = vec![0u8; program.map.len() * 4];
     let mut sim = Duration::ZERO;
     let mut raster = Duration::ZERO;
     let mut clone_t = Duration::ZERO;
     let mut steps = 0u64;
 
     for _ in 0..frames {
-        if pixels.len() != program.map.len() * 4 {
-            pixels.resize(program.map.len() * 4, 0);
-        }
-
         let start_itr = program.itr_count;
         let t0 = Instant::now();
         let mut remaining = DEFAULT_MAX_ITRS;
@@ -66,7 +59,7 @@ fn time_frames(program: &mut Program, frames: u32) -> Timings {
         steps += program.itr_count.saturating_sub(start_itr);
 
         let t1 = Instant::now();
-        fill_rgba_from_map(&program.map, &mut pixels, &colors);
+        let pixels = program.canvas.clone();
         raster += t1.elapsed();
 
         let t2 = Instant::now();

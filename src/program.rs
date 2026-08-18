@@ -1,6 +1,7 @@
 //! Shared tape plus one or more machines that step on it in order.
 
 use crate::machine::{validate_map_size, wrap_pos, Machine};
+use crate::palette::{empty_canvas, fill_rgba_from_map, Palette};
 use crate::tape::{self, TapeInit};
 
 pub use crate::machine::{
@@ -30,6 +31,10 @@ pub struct Program {
     pub width: usize,
     pub height: usize,
     pub map: Vec<i32>,
+    /// Baked RGBA canvas (4 bytes per cell).
+    pub canvas: Vec<u8>,
+    /// Colours used when Restart / Reseed fills the canvas from the tape.
+    pub canvas_palette: Palette,
     pub machines: Vec<Machine>,
     pub itr_count: u64,
     /// How [`Self::reset`] fills the tape. Empty (all zeros) is the default.
@@ -58,12 +63,17 @@ impl Program {
 
         let mut machine = Machine::new_random(num_states, num_symbols, width, height);
         machine.name = default_machine_name(0);
+        let canvas_palette = Palette::classic();
+        machine.palette = canvas_palette.clone();
+        let cells = width * height;
         let mut prog = Self {
             num_states,
             num_symbols,
             width,
             height,
-            map: vec![0; width * height],
+            map: vec![0; cells],
+            canvas: empty_canvas(cells),
+            canvas_palette,
             machines: vec![machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -77,12 +87,17 @@ impl Program {
     pub fn from_string(s: &str) -> Result<Self, String> {
         let mut parsed = Machine::from_string(s, DEFAULT_MAP_WIDTH, DEFAULT_MAP_HEIGHT)?;
         parsed.machine.name = default_machine_name(0);
+        let canvas_palette = Palette::classic();
+        parsed.machine.palette = canvas_palette.clone();
+        let cells = DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT;
         let mut prog = Self {
             num_states: parsed.num_states,
             num_symbols: parsed.num_symbols,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
-            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            map: vec![0; cells],
+            canvas: empty_canvas(cells),
+            canvas_palette,
             machines: vec![parsed.machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -101,8 +116,20 @@ impl Program {
             self.num_symbols,
             &self.tape_init,
         );
+        if self.canvas.len() != self.map.len() * 4 {
+            self.canvas.resize(self.map.len() * 4, 0);
+        }
+        fill_rgba_from_map(&self.map, &mut self.canvas, &self.canvas_palette.colors);
         for machine in &mut self.machines {
             machine.reset();
+        }
+    }
+
+    /// Rebuild every palette's colour table for the current symbol count.
+    pub fn resolve_palettes(&mut self) {
+        self.canvas_palette.resolve(self.num_symbols);
+        for machine in &mut self.machines {
+            machine.palette.resolve(self.num_symbols);
         }
     }
 
@@ -128,6 +155,7 @@ impl Program {
         self.width = width;
         self.height = height;
         self.map = vec![0; width * height];
+        self.canvas = empty_canvas(width * height);
         let w = width as i32;
         let h = height as i32;
         for machine in &mut self.machines {
@@ -149,6 +177,7 @@ impl Program {
         let speeds: Vec<f32> = self.machines.iter().map(|m| m.speed).collect();
         let names: Vec<String> = self.machines.iter().map(|m| m.name.clone()).collect();
         let ids: Vec<u64> = self.machines.iter().map(|m| m.id).collect();
+        let palettes: Vec<Palette> = self.machines.iter().map(|m| m.palette.clone()).collect();
         let n = self.machines.len().max(1);
         let (width, height) = (self.width, self.height);
         self.machines = (0..n)
@@ -161,14 +190,23 @@ impl Program {
             if let Some(id) = ids.get(i) {
                 machine.id = *id;
             }
+            if let Some(palette) = palettes.get(i) {
+                machine.palette = palette.clone();
+            }
             machine.name = names
                 .get(i)
                 .cloned()
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or_else(|| default_machine_name(i));
         }
+        self.resolve_palettes();
         self.ensure_machine_ids();
         self.reset();
+        for (i, machine) in self.machines.iter_mut().enumerate() {
+            if let Some(palette) = palettes.get(i) {
+                machine.palette = palette.clone();
+            }
+        }
     }
 
     /// Replace one machine with a new random table and start, then reset.
@@ -182,12 +220,14 @@ impl Program {
         let active = self.machines[index].active;
         let name = self.machines[index].name.clone();
         let id = self.machines[index].id;
+        let palette = self.machines[index].palette.clone();
         self.machines[index] =
             Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
         self.machines[index].speed = speed;
         self.machines[index].active = active;
         self.machines[index].name = name;
         self.machines[index].id = id;
+        self.machines[index].palette = palette;
         self.reset();
         Ok(())
     }
@@ -252,6 +292,7 @@ impl Program {
         let mut machine =
             Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
         machine.name = default_machine_name(self.machines.len());
+        machine.palette = self.canvas_palette.clone();
         self.machines.push(machine);
         self.ensure_machine_ids();
         self.reset();
@@ -294,6 +335,7 @@ impl Program {
         let speed = self.machines[index].speed;
         let name = self.machines[index].name.clone();
         let id = self.machines[index].id;
+        let palette = self.machines[index].palette.clone();
         if self.machines.len() == 1 {
             self.num_states = parsed.num_states;
             self.num_symbols = parsed.num_symbols;
@@ -301,6 +343,8 @@ impl Program {
             self.machines[0].speed = speed;
             self.machines[0].name = name;
             self.machines[0].id = id;
+            self.machines[0].palette = palette;
+            self.resolve_palettes();
             self.reset();
             return Ok(());
         }
@@ -316,6 +360,7 @@ impl Program {
         self.machines[index].speed = speed;
         self.machines[index].name = name;
         self.machines[index].id = id;
+        self.machines[index].palette = palette;
         self.reset();
         Ok(())
     }
@@ -332,9 +377,15 @@ impl Program {
         let num_states = self.num_states;
 
         for _ in 0..num_itrs {
-            for machine in &mut self.machines {
+            for machine in self.machines.iter_mut() {
                 if machine.active {
-                    machine.take_scheduled_steps(&mut self.map, num_states, width, height);
+                    machine.take_scheduled_steps(
+                        &mut self.map,
+                        &mut self.canvas,
+                        num_states,
+                        width,
+                        height,
+                    );
                 }
             }
             self.itr_count += 1;
@@ -365,6 +416,7 @@ impl Program {
 mod tests {
     use super::*;
     use crate::machine::{Machine, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT};
+    use crate::palette::{empty_canvas, rgb_at, Palette, PaletteKind};
     use crate::tape::{TapeInit, TapeInitKind};
 
     fn fixed_machine(table: Vec<i32>, start_x: i32, start_y: i32) -> Machine {
@@ -379,6 +431,7 @@ mod tests {
             active: true,
             name: String::new(),
             id: 0,
+            palette: Palette::classic(),
             rounds_at_speed: 0,
             steps_at_speed: 0,
         }
@@ -397,6 +450,8 @@ mod tests {
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
+            canvas_palette: Palette::classic(),
             machines: vec![fixed_machine(table, start_x, start_y)],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -584,6 +639,8 @@ mod tests {
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
+            canvas_palette: Palette::classic(),
             machines: vec![m0, m1],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -676,6 +733,8 @@ mod tests {
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
+            canvas_palette: Palette::classic(),
             machines: vec![fast, slow, normal, mid],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -701,6 +760,8 @@ mod tests {
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
+            canvas_palette: Palette::classic(),
             machines: vec![active, inactive],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -745,6 +806,8 @@ mod tests {
             width: 10,
             height: 8,
             map: vec![0; 80],
+            canvas: empty_canvas(80),
+            canvas_palette: Palette::classic(),
             machines: vec![fixed_machine(vec![0, 1, ACTION_LEFT], 9, 0)],
             itr_count: 0,
             tape_init: TapeInit::default(),
@@ -772,6 +835,7 @@ mod tests {
         assert_eq!(p.width, 128);
         assert_eq!(p.height, 64);
         assert_eq!(p.map.len(), 128 * 64);
+        assert_eq!(p.canvas.len(), 128 * 64 * 4);
         assert_eq!(p.machines[0].start_x, wrap_pos(500, 128));
         assert_eq!(p.machines[0].start_y, wrap_pos(500, 64));
         assert_eq!(p.machines[0].x_pos, p.machines[0].start_x);
@@ -989,5 +1053,92 @@ mod tests {
         p.reseed_tape();
         assert_ne!(p.tape_init.seed, 123);
         assert_ne!(p.map, first);
+    }
+
+    #[test]
+    fn step_bakes_machine_palette_rgb() {
+        let mut p = fixed_program(1, 2, vec![0, 1, ACTION_LEFT], 0, 0);
+        p.machines[0].palette.colors[1] = [10, 20, 30];
+        p.update(1);
+        assert_eq!(p.map[0], 1);
+        assert_eq!(rgb_at(&p.canvas, 0), [10, 20, 30]);
+    }
+
+    #[test]
+    fn palette_edits_do_not_recolor_canvas() {
+        let mut p = fixed_program(1, 2, vec![0, 1, ACTION_LEFT], 0, 0);
+        p.machines[0].palette.colors[1] = [10, 20, 30];
+        p.update(1);
+        assert_eq!(rgb_at(&p.canvas, 0), [10, 20, 30]);
+
+        p.machines[0].palette.colors[1] = [1, 2, 3];
+        assert_eq!(rgb_at(&p.canvas, 0), [10, 20, 30]);
+    }
+
+    #[test]
+    fn two_machines_use_distinct_colors_for_same_symbol() {
+        let m0 = {
+            let mut m = fixed_machine(vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 0, 0);
+            m.palette.colors[1] = [10, 20, 30];
+            m
+        };
+        let m1 = {
+            let mut m = fixed_machine(vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 1, 0);
+            m.palette.colors[1] = [40, 50, 60];
+            m
+        };
+        let mut p = Program {
+            num_states: 1,
+            num_symbols: 2,
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
+            canvas_palette: Palette::classic(),
+            machines: vec![m0, m1],
+            itr_count: 0,
+            tape_init: TapeInit::default(),
+        };
+        p.update(1);
+        assert_eq!(p.map[0], 1);
+        assert_eq!(p.map[1], 1);
+        assert_eq!(rgb_at(&p.canvas, 0), [10, 20, 30]);
+        assert_eq!(rgb_at(&p.canvas, 1), [40, 50, 60]);
+    }
+
+    #[test]
+    fn reset_fills_canvas_from_tape_using_canvas_palette() {
+        let mut p = fixed_program(1, 2, vec![0, 1, ACTION_LEFT], 0, 0);
+        p.canvas_palette.colors[0] = [9, 8, 7];
+        p.reset();
+        assert_eq!(rgb_at(&p.canvas, 0), [9, 8, 7]);
+
+        p.machines[0].palette.colors[1] = [10, 20, 30];
+        p.update(1);
+        assert_eq!(rgb_at(&p.canvas, 0), [10, 20, 30]);
+
+        p.canvas_palette.colors[0] = [1, 1, 1];
+        assert_eq!(rgb_at(&p.canvas, 0), [10, 20, 30]);
+        p.reset();
+        assert_eq!(rgb_at(&p.canvas, 0), [1, 1, 1]);
+    }
+
+    #[test]
+    fn add_machine_clones_canvas_palette() {
+        let mut p = Program::new_random(2, 3);
+        p.canvas_palette.set_kind(PaletteKind::Sunset, 3);
+        p.add_machine();
+        assert_eq!(p.machines[1].palette.kind, PaletteKind::Sunset);
+        assert_eq!(p.machines[1].palette.colors, p.canvas_palette.colors);
+    }
+
+    #[test]
+    fn randomize_preserves_machine_palette() {
+        let mut p = Program::new_random(2, 3);
+        p.machines[0].palette.set_kind(PaletteKind::Neon, 3);
+        let colors = p.machines[0].palette.colors;
+        p.randomize(2, 3);
+        assert_eq!(p.machines[0].palette.kind, PaletteKind::Neon);
+        assert_eq!(p.machines[0].palette.colors, colors);
     }
 }
