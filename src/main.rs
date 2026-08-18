@@ -388,6 +388,8 @@ impl App {
         let share_texts = vec![program.machine_encoding(0)];
         let pixels = program.canvas.clone();
         let frame = Handle::from_rgba(program.width as u32, program.height as u32, pixels.clone());
+        let init_dirty = DirtyRect::full(program.width as u32, program.height as u32);
+        let init_revision = program.canvas_revision;
 
         (
             Self {
@@ -403,8 +405,8 @@ impl App {
                 share_texts,
                 status: String::new(),
                 pixels,
-                gpu_dirty: Some(DirtyRect::full(program.width as u32, program.height as u32)),
-                gpu_dirty_revision: program.canvas_revision,
+                gpu_dirty: Some(init_dirty),
+                gpu_dirty_revision: init_revision,
                 frame,
                 drawing_only: false,
                 color_picker: ColorPicker::new(),

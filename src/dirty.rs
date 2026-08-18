@@ -25,6 +25,20 @@ impl DirtyRect {
         }
     }
 
+    /// Clamp to canvas bounds, returning a zero-area rect if fully outside.
+    pub fn clamp(self, canvas_w: u32, canvas_h: u32) -> Self {
+        let x = self.x.min(canvas_w);
+        let y = self.y.min(canvas_h);
+        let w = (self.x + self.width).min(canvas_w).saturating_sub(x);
+        let h = (self.y + self.height).min(canvas_h).saturating_sub(y);
+        Self {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
     pub fn union(self, other: Self) -> Self {
         let x0 = self.x.min(other.x);
         let y0 = self.y.min(other.y);

@@ -447,14 +447,21 @@ impl shader::Primitive for RasterPrimitive {
         let width = self.width;
         let height = self.height;
         let canvas = unsafe { &*self.canvas };
+        let size_changed = pipeline.tex_size != (width, height);
         pipeline.resize_map(device, width, height);
         if pipeline.last_uploaded_revision != Some(self.revision) {
             let full = DirtyRect::full(width, height);
-            let dirty = self.dirty.unwrap_or(full);
-            if dirty == full {
+            if size_changed {
                 pipeline.upload_map_full(queue, canvas, width, height);
             } else {
-                pipeline.upload_map_region(queue, canvas, width, dirty);
+                let dirty = self.dirty.unwrap_or(full).clamp(width, height);
+                if dirty.width == 0 || dirty.height == 0 {
+                    // nothing to upload
+                } else if dirty == full {
+                    pipeline.upload_map_full(queue, canvas, width, height);
+                } else {
+                    pipeline.upload_map_region(queue, canvas, width, dirty);
+                }
             }
             pipeline.last_uploaded_revision = Some(self.revision);
         }
