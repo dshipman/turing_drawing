@@ -15,9 +15,7 @@ use turing_drawing::chrome;
 use turing_drawing::color_picker::{self, ColorPicker, ControlsMessage, GradientEndpoint};
 use turing_drawing::drawing::{self, simulation_frame};
 use turing_drawing::gpu_raster::{self, RasterMode};
-use turing_drawing::palette::{
-    fill_rgba_from_map, parse_hex_rgb, rgb_to_hex, rgba_from_map, Palette, PaletteKind,
-};
+use turing_drawing::palette::{parse_hex_rgb, rgb_to_hex, Palette, PaletteKind};
 use turing_drawing::preset::{self, PresetInfo, PresetSort};
 use turing_drawing::program::{
     default_machine_name, remap_index_after_reorder, step_rate, Program, DEFAULT_MUTATE_PERCENT,
@@ -200,8 +198,9 @@ struct App {
     frame: Handle,
     /// When true, only the drawing is shown (controls and share encodings hidden).
     drawing_only: bool,
-    palette: Palette,
     color_picker: ColorPicker,
+    /// Gradient picker for the selected machine's palette.
+    machine_color_picker: ColorPicker,
     /// Machine whose inspector section is open.
     selected_machine: Option<usize>,
     /// Machine currently being dragged in the left pool.
@@ -309,6 +308,10 @@ enum Message {
     GradientStartChanged(String),
     GradientEndChanged(String),
     ColorPicker(color_picker::Message),
+    MachinePaletteSelected(usize, PaletteKind),
+    MachineGradientStartChanged(usize, String),
+    MachineGradientEndChanged(usize, String),
+    MachineColorPicker(usize, color_picker::Message),
     OpenPresetBrowser,
     ClosePresetBrowser,
     PresetNameChanged(String),
@@ -362,6 +365,14 @@ impl App {
             defaults.map_width,
             defaults.map_height,
         );
+        let mut palette = Palette::classic();
+        let _ = palette.set_gradient_start_hex(defaults.gradient_start.clone(), num_symbols);
+        let _ = palette.set_gradient_end_hex(defaults.gradient_end.clone(), num_symbols);
+        palette.set_kind(defaults.palette_kind, num_symbols);
+        program.canvas_palette = palette.clone();
+        for machine in &mut program.machines {
+            machine.palette = palette.clone();
+        }
         program.set_tape_init(TapeInit::from_kind_and_params(
             defaults.tape_kind,
             defaults.gaussian_mean,
@@ -370,11 +381,7 @@ impl App {
             defaults.perlin_octaves,
         ));
         let share_texts = vec![program.machine_encoding(0)];
-        let mut palette = Palette::classic();
-        let _ = palette.set_gradient_start_hex(defaults.gradient_start.clone(), num_symbols);
-        let _ = palette.set_gradient_end_hex(defaults.gradient_end.clone(), num_symbols);
-        palette.set_kind(defaults.palette_kind, num_symbols);
-        let pixels = rgba_from_map(&program.map, &palette.colors);
+        let pixels = program.canvas.clone();
         let frame = Handle::from_rgba(program.width as u32, program.height as u32, pixels.clone());
 
         (
@@ -393,8 +400,8 @@ impl App {
                 pixels,
                 frame,
                 drawing_only: false,
-                palette,
                 color_picker: ColorPicker::new(),
+                machine_color_picker: ColorPicker::new(),
                 selected_machine: None,
                 dragging_machine: None,
                 preset_browser_open: false,
@@ -605,6 +612,7 @@ impl App {
             Action::CloseSettings => self.update(Message::CloseSettings),
             Action::CloseColorPicker => {
                 self.color_picker.close();
+                self.machine_color_picker.close();
                 Task::none()
             }
             Action::SettingsTabDefaults => self.update(Message::SettingsTab(SettingsTab::Defaults)),
@@ -641,15 +649,18 @@ impl App {
         }
     }
 
-    fn apply_loaded_program(&mut self, program: Program, label: &str) {
+    fn apply_loaded_program(&mut self, mut program: Program, label: &str) {
+        program.canvas_palette = self.program.canvas_palette.clone();
+        program.canvas_palette.resolve(program.num_symbols);
+        program.reset();
         self.program = program;
         self.num_states = self.program.num_states;
         self.num_symbols = self.program.num_symbols;
         self.sync_resolution_text();
-        self.palette.resolve(self.num_symbols);
         self.selected_machine = None;
         self.dragging_machine = None;
         self.picking_start = None;
+        self.machine_color_picker.close();
         self.sync_share_texts();
         self.status = label.to_string();
         self.prune_machine_bindings();
@@ -708,16 +719,14 @@ impl App {
             Message::IncSymbols => {
                 if self.num_symbols < MAX_SYMBOLS {
                     self.num_symbols += 1;
-                    self.palette.resolve(self.num_symbols);
-                    self.refresh_frame();
+                    self.program.canvas_palette.resolve(self.num_symbols);
                 }
                 Task::none()
             }
             Message::DecSymbols => {
                 if self.num_symbols > MIN_SYMBOLS {
                     self.num_symbols -= 1;
-                    self.palette.resolve(self.num_symbols);
-                    self.refresh_frame();
+                    self.program.canvas_palette.resolve(self.num_symbols);
                 }
                 Task::none()
             }
@@ -966,10 +975,12 @@ impl App {
                 } else {
                     Some(i)
                 };
+                self.machine_color_picker.close();
                 Task::none()
             }
             Message::CloseMachineDetails => {
                 self.selected_machine = None;
+                self.machine_color_picker.close();
                 Task::none()
             }
             Message::MachineNameChanged(i, name) => match self.program.set_machine_name(i, name) {
@@ -1049,7 +1060,7 @@ impl App {
                     Ok(()) => {
                         self.num_states = self.program.num_states;
                         self.num_symbols = self.program.num_symbols;
-                        self.palette.resolve(self.num_symbols);
+                        self.program.canvas_palette.resolve(self.num_symbols);
                         self.sync_share_texts();
                         let name = self.program.machines[i].display_name(i);
                         self.status = format!("Loaded encoding for {name}");
@@ -1112,32 +1123,40 @@ impl App {
                 }
                 if self.selected_machine.is_some() {
                     self.selected_machine = None;
+                    self.machine_color_picker.close();
                     return Task::none();
                 }
                 if self.color_picker.is_open() {
                     self.color_picker.close();
                     return Task::none();
                 }
+                if self.machine_color_picker.is_open() {
+                    self.machine_color_picker.close();
+                    return Task::none();
+                }
                 self.drawing_only = false;
                 Self::exit_fullscreen_if_needed()
             }
             Message::PaletteSelected(kind) => {
-                self.palette.set_kind(kind, self.num_symbols);
+                self.program.canvas_palette.set_kind(kind, self.num_symbols);
                 if kind != PaletteKind::Gradient {
                     self.color_picker.close();
                 }
-                self.status = format!("Palette: {kind}");
-                self.refresh_frame();
+                self.status = format!("Canvas palette: {kind}");
                 Task::none()
             }
             Message::GradientStartChanged(hex) => {
-                match self.palette.set_gradient_start_hex(hex, self.num_symbols) {
+                match self
+                    .program
+                    .canvas_palette
+                    .set_gradient_start_hex(hex, self.num_symbols)
+                {
                     Ok(()) => {
                         self.status.clear();
                         if self.color_picker.open_endpoint() == Some(GradientEndpoint::Start) {
-                            self.color_picker.sync_from_rgb(self.palette.gradient_start);
+                            self.color_picker
+                                .sync_from_rgb(self.program.canvas_palette.gradient_start);
                         }
-                        self.refresh_frame();
                     }
                     Err(e) => {
                         self.status = format!("Start colour: {e}");
@@ -1146,13 +1165,17 @@ impl App {
                 Task::none()
             }
             Message::GradientEndChanged(hex) => {
-                match self.palette.set_gradient_end_hex(hex, self.num_symbols) {
+                match self
+                    .program
+                    .canvas_palette
+                    .set_gradient_end_hex(hex, self.num_symbols)
+                {
                     Ok(()) => {
                         self.status.clear();
                         if self.color_picker.open_endpoint() == Some(GradientEndpoint::End) {
-                            self.color_picker.sync_from_rgb(self.palette.gradient_end);
+                            self.color_picker
+                                .sync_from_rgb(self.program.canvas_palette.gradient_end);
                         }
-                        self.refresh_frame();
                     }
                     Err(e) => {
                         self.status = format!("End colour: {e}");
@@ -1161,13 +1184,13 @@ impl App {
                 Task::none()
             }
             Message::ColorPicker(msg) => {
-                match self
-                    .color_picker
-                    .update(msg, &mut self.palette, self.num_symbols)
-                {
+                match self.color_picker.update(
+                    msg,
+                    &mut self.program.canvas_palette,
+                    self.num_symbols,
+                ) {
                     Ok(true) => {
                         self.status.clear();
-                        self.refresh_frame();
                     }
                     Ok(false) => {}
                     Err(e) => {
@@ -1176,8 +1199,80 @@ impl App {
                 }
                 Task::none()
             }
+            Message::MachinePaletteSelected(i, kind) => {
+                if let Some(machine) = self.program.machines.get_mut(i) {
+                    machine.palette.set_kind(kind, self.program.num_symbols);
+                    if kind != PaletteKind::Gradient {
+                        self.machine_color_picker.close();
+                    }
+                    let name = machine.display_name(i);
+                    self.status = format!("{name} palette: {kind}");
+                }
+                Task::none()
+            }
+            Message::MachineGradientStartChanged(i, hex) => {
+                let n = self.program.num_symbols;
+                match self.program.machines.get_mut(i) {
+                    Some(machine) => match machine.palette.set_gradient_start_hex(hex, n) {
+                        Ok(()) => {
+                            self.status.clear();
+                            if self.machine_color_picker.open_endpoint()
+                                == Some(GradientEndpoint::Start)
+                            {
+                                self.machine_color_picker
+                                    .sync_from_rgb(machine.palette.gradient_start);
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("Start colour: {e}");
+                        }
+                    },
+                    None => {}
+                }
+                Task::none()
+            }
+            Message::MachineGradientEndChanged(i, hex) => {
+                let n = self.program.num_symbols;
+                match self.program.machines.get_mut(i) {
+                    Some(machine) => match machine.palette.set_gradient_end_hex(hex, n) {
+                        Ok(()) => {
+                            self.status.clear();
+                            if self.machine_color_picker.open_endpoint()
+                                == Some(GradientEndpoint::End)
+                            {
+                                self.machine_color_picker
+                                    .sync_from_rgb(machine.palette.gradient_end);
+                            }
+                        }
+                        Err(e) => {
+                            self.status = format!("End colour: {e}");
+                        }
+                    },
+                    None => {}
+                }
+                Task::none()
+            }
+            Message::MachineColorPicker(i, msg) => {
+                let n = self.program.num_symbols;
+                if let Some(machine) = self.program.machines.get_mut(i) {
+                    match self
+                        .machine_color_picker
+                        .update(msg, &mut machine.palette, n)
+                    {
+                        Ok(true) => {
+                            self.status.clear();
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            self.status = format!("Picker colour: {e}");
+                        }
+                    }
+                }
+                Task::none()
+            }
             Message::OpenPresetBrowser => {
                 self.selected_machine = None;
+                self.machine_color_picker.close();
                 self.settings_open = false;
                 self.capturing_action = None;
                 self.preset_browser_open = true;
@@ -1592,11 +1687,7 @@ impl App {
         if self.raster_mode != RasterMode::Cpu {
             return;
         }
-        let needed = self.program.map.len() * 4;
-        if self.pixels.len() != needed {
-            self.pixels.resize(needed, 0);
-        }
-        fill_rgba_from_map(&self.program.map, &mut self.pixels, &self.palette.colors);
+        self.pixels.clone_from(&self.program.canvas);
         self.frame = Handle::from_rgba(
             self.program.width as u32,
             self.program.height as u32,
@@ -1648,11 +1739,10 @@ impl App {
 
     fn drawing_canvas(&self) -> Element<'_, Message> {
         let drawing: Element<'_, Message> = match self.raster_mode {
-            RasterMode::Gpu => gpu_raster::map_shader(
-                &self.program.map,
+            RasterMode::Gpu => gpu_raster::canvas_shader(
+                &self.program.canvas,
                 self.program.width as u32,
                 self.program.height as u32,
-                &self.palette.colors,
             )
             .into(),
             RasterMode::Cpu => simulation_frame(self.frame.clone()).into(),
@@ -2083,8 +2173,14 @@ impl App {
     }
 
     fn palette_group(&self) -> Element<'_, Message> {
-        color_picker::palette_controls(&self.palette, &self.color_picker, self.num_symbols).map(
-            |msg| match msg {
+        column![
+            chrome::dim("Applies on Restart / Reseed (machine 0 band)."),
+            color_picker::palette_controls(
+                &self.program.canvas_palette,
+                &self.color_picker,
+                self.num_symbols,
+            )
+            .map(|msg| match msg {
                 ControlsMessage::KindSelected(kind) => Message::PaletteSelected(kind),
                 ControlsMessage::GradientStartChanged(hex) => Message::GradientStartChanged(hex),
                 ControlsMessage::GradientEndChanged(hex) => Message::GradientEndChanged(hex),
@@ -2092,8 +2188,10 @@ impl App {
                     Message::OpenButtonControls(BindTarget::global(Action::CloseColorPicker))
                 }
                 ControlsMessage::Picker(m) => Message::ColorPicker(m),
-            },
-        )
+            }),
+        ]
+        .spacing(6)
+        .into()
     }
 
     fn simulation_group(&self) -> Element<'_, Message> {
@@ -2209,6 +2307,13 @@ impl App {
                         machine.start_x,
                         machine.start_y
                     )),
+                    chrome::label("Palette"),
+                    color_picker::palette_controls(
+                        &machine.palette,
+                        &self.machine_color_picker,
+                        self.program.num_symbols,
+                    )
+                    .map(move |msg| machine_palette_message(index, msg)),
                     chrome::label("Encoding"),
                     chrome::field("numStates,numSymbols,startX,startY,...", share)
                         .on_input(move |s| Message::ShareChanged(index, s))
@@ -2827,6 +2932,20 @@ fn stepper(
     .spacing(4)
     .align_y(Alignment::Center)
     .into()
+}
+
+fn machine_palette_message(index: usize, msg: ControlsMessage) -> Message {
+    match msg {
+        ControlsMessage::KindSelected(kind) => Message::MachinePaletteSelected(index, kind),
+        ControlsMessage::GradientStartChanged(hex) => {
+            Message::MachineGradientStartChanged(index, hex)
+        }
+        ControlsMessage::GradientEndChanged(hex) => Message::MachineGradientEndChanged(index, hex),
+        ControlsMessage::Picker(color_picker::Message::BindClose) => {
+            Message::OpenButtonControls(BindTarget::global(Action::CloseColorPicker))
+        }
+        ControlsMessage::Picker(m) => Message::MachineColorPicker(index, m),
+    }
 }
 
 fn machine_active_toggler(index: usize, active: bool) -> Element<'static, Message> {
