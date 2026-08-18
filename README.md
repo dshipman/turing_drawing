@@ -17,6 +17,12 @@ cargo run --release
 
 Debug builds work but the simulation is much slower; prefer `--release`.
 
+Headless CPU timings for saved presets and every resolution preset:
+
+```bash
+cargo run --release --bin profile_presets
+```
+
 ## Controls
 
 The window is a compact toolbar, a left machine pool, a centre drawing, a right panel (Canvas, Palette, Simulation), and a status bar. Those groups collapse from their headers. Selecting a machine opens its details below the machine list.
@@ -29,6 +35,7 @@ The window is a compact toolbar, a left machine pool, a centre drawing, a right 
 - **Speed** (global) — how hard the simulation runs each frame (`0` = paused, `1` = max). This is a fraction of **Max itrs/frame**.
 - **Refresh rate** — target simulation ticks per second (default `60` Hz). Choose a preset (`30`, `60`, `120`, `144`, `165`, `240`) or type a custom integer (`1`–`240`). Each tick also stops if that frame's time budget is used up, so work cannot overrun the chosen period.
 - **Max itrs/frame** — cap on simulation rounds each tick at Speed `1` (default `350000`, range `1000`–`2000000`). Work also yields when the frame's time budget is spent.
+- **Raster** — how the symbol grid is colorized for display. **GPU** (default) uploads the map and looks up palette colours in a shader; **CPU** builds an RGBA image on the CPU (fallback). Machine stepping always runs on the CPU. GPU mode needs iced's wgpu backend (the desktop default). If the drawing is blank, switch to CPU.
 - **Speed** (per machine) — how often that machine steps relative to the others. The slider is continuous from `−10` to `+10` (step `0.1`). `0` is the default rate (one step per round). Frequency is `10^(speed / 10)`, so `+10` is ten times more often and `−10` is ten times less often. Changing speed does not reset the drawing.
 - **Restart** — clear the grid and send each head back to its start without changing rules
 - **Presets** — open the preset browser to **Store** the starting setup of all machines (shared state/symbol counts, canvas size, each machine's rules, start position, and speed) to disk, or **Load** / **Delete** a saved preset. Loading replaces the current machines and clears the drawing (same as Restart after swapping rules). Palette, global Speed, Refresh rate, and Max itrs/frame are not saved. Older preset files without a canvas size load at `512 × 512`. Presets live in the app data folder (e.g. `~/Library/Application Support/turing_drawing/presets/` on macOS) as JSON; storing the same name overwrites. The list can be sorted by **Name** or **Date saved** (newest first; default).

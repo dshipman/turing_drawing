@@ -1,11 +1,3 @@
-mod chrome;
-mod color_picker;
-mod drawing;
-mod machine;
-mod palette;
-mod preset;
-mod program;
-
 use std::time::{Duration, Instant};
 
 use iced::keyboard::key;
@@ -19,11 +11,13 @@ use iced::{
     Subscription, Task, Theme,
 };
 
-use color_picker::{ColorPicker, ControlsMessage, GradientEndpoint};
-use drawing::simulation_frame;
-use palette::{Palette, PaletteKind, Rgb};
-use preset::{PresetInfo, PresetSort};
-use program::{
+use turing_drawing::chrome;
+use turing_drawing::color_picker::{self, ColorPicker, ControlsMessage, GradientEndpoint};
+use turing_drawing::drawing::simulation_frame;
+use turing_drawing::gpu_raster::{self, RasterMode};
+use turing_drawing::palette::{fill_rgba_from_map, rgba_from_map, Palette, PaletteKind};
+use turing_drawing::preset::{self, PresetInfo, PresetSort};
+use turing_drawing::program::{
     step_rate, Program, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH, MAX_MACHINE_SPEED, MAX_MAP_SIZE,
     MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_STATES, MIN_SYMBOLS,
 };
@@ -209,6 +203,8 @@ struct App {
     simulation_open: bool,
     /// When set, simulation stays paused until this instant.
     mode_switch_resume_at: Option<Instant>,
+    /// GPU colorize (default) or the CPU RGBA fallback.
+    raster_mode: RasterMode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,6 +228,7 @@ enum Message {
     MapWidthText(String),
     MapHeightText(String),
     MaxItrsChanged(f32),
+    RasterMode(RasterMode),
     Random,
     Restart,
     AddMachine,
@@ -300,6 +297,7 @@ impl App {
                 palette_open: true,
                 simulation_open: true,
                 mode_switch_resume_at: None,
+                raster_mode: RasterMode::Gpu,
             },
             Task::none(),
         )
@@ -471,6 +469,10 @@ impl App {
             Message::MaxItrsChanged(value) => {
                 let value = value.round() as u64;
                 self.max_itrs = value.clamp(MIN_MAX_ITRS, MAX_MAX_ITRS);
+                Task::none()
+            }
+            Message::RasterMode(mode) => {
+                self.set_raster_mode(mode);
                 Task::none()
             }
             Message::Random => {
@@ -824,7 +826,26 @@ impl App {
         }
     }
 
+    fn set_raster_mode(&mut self, mode: RasterMode) {
+        if mode == self.raster_mode {
+            return;
+        }
+        self.raster_mode = mode;
+        match mode {
+            RasterMode::Gpu => {
+                self.status = "Raster: GPU".into();
+            }
+            RasterMode::Cpu => {
+                self.status = "Raster: CPU".into();
+                self.refresh_frame();
+            }
+        }
+    }
+
     fn refresh_frame(&mut self) {
+        if self.raster_mode != RasterMode::Cpu {
+            return;
+        }
         let needed = self.program.map.len() * 4;
         if self.pixels.len() != needed {
             self.pixels.resize(needed, 0);
@@ -848,15 +869,22 @@ impl App {
     }
 
     fn drawing_canvas(&self) -> Element<'_, Message> {
-        container(
-            mouse_area(simulation_frame(self.frame.clone()))
-                .on_double_click(Message::ToggleDrawingOnly),
-        )
-        .center(Length::Fill)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(chrome::viewer)
-        .into()
+        let drawing: Element<'_, Message> = match self.raster_mode {
+            RasterMode::Gpu => gpu_raster::map_shader(
+                &self.program.map,
+                self.program.width as u32,
+                self.program.height as u32,
+                &self.palette.colors,
+            )
+            .into(),
+            RasterMode::Cpu => simulation_frame(self.frame.clone()).into(),
+        };
+        container(mouse_area(drawing).on_double_click(Message::ToggleDrawingOnly))
+            .center(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(chrome::viewer)
+            .into()
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -1143,6 +1171,17 @@ impl App {
                 .spacing(6)
                 .align_y(Alignment::Center),
             ),
+            inspector_row(
+                "Raster",
+                chrome::decorate_pick_list(
+                    pick_list(
+                        RasterMode::ALL,
+                        Some(self.raster_mode),
+                        Message::RasterMode,
+                    )
+                    .width(Length::Fill),
+                ),
+            ),
         ]
         .spacing(6)
         .into()
@@ -1209,12 +1248,13 @@ impl App {
     fn status_bar(&self) -> Element<'_, Message> {
         let n = self.program.machines.len();
         let stats = format!(
-            "{n} machine{}  ·  {} itrs  ·  {}×{}  ·  {} Hz",
+            "{n} machine{}  ·  {} itrs  ·  {}×{}  ·  {} Hz  ·  {}",
             if n == 1 { "" } else { "s" },
             self.program.itr_count,
             self.program.width,
             self.program.height,
             self.refresh_hz,
+            self.raster_mode,
         );
         container(
             row![
@@ -1392,24 +1432,6 @@ fn machine_speed_label(speed: f32) -> String {
         "0.0  ×1.00".into()
     } else {
         format!("{speed:+.1}  ×{rate:.2}")
-    }
-}
-
-fn rgba_from_map(map: &[i32], colors: &[Rgb; MAX_SYMBOLS]) -> Vec<u8> {
-    let mut pixels = vec![0u8; map.len() * 4];
-    fill_rgba_from_map(map, &mut pixels, colors);
-    pixels
-}
-
-fn fill_rgba_from_map(map: &[i32], pixels: &mut [u8], colors: &[Rgb; MAX_SYMBOLS]) {
-    debug_assert_eq!(pixels.len(), map.len() * 4);
-    for (i, &sy) in map.iter().enumerate() {
-        let c = colors[sy as usize];
-        let o = i * 4;
-        pixels[o] = c[0];
-        pixels[o + 1] = c[1];
-        pixels[o + 2] = c[2];
-        pixels[o + 3] = 255;
     }
 }
 

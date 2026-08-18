@@ -252,6 +252,26 @@ pub fn rgb_to_hex(rgb: Rgb) -> String {
     format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
 }
 
+/// Allocate an RGBA frame from the symbol map.
+pub fn rgba_from_map(map: &[i32], colors: &[Rgb; MAX_SYMBOLS]) -> Vec<u8> {
+    let mut pixels = vec![0u8; map.len() * 4];
+    fill_rgba_from_map(map, &mut pixels, colors);
+    pixels
+}
+
+/// Colorize `map` into `pixels` (4 bytes per cell, alpha 255).
+pub fn fill_rgba_from_map(map: &[i32], pixels: &mut [u8], colors: &[Rgb; MAX_SYMBOLS]) {
+    debug_assert_eq!(pixels.len(), map.len() * 4);
+    for (i, &sy) in map.iter().enumerate() {
+        let c = colors[sy as usize];
+        let o = i * 4;
+        pixels[o] = c[0];
+        pixels[o + 1] = c[1];
+        pixels[o + 2] = c[2];
+        pixels[o + 3] = 255;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,5 +377,17 @@ mod tests {
         assert!(!err.is_empty());
         assert_eq!(p.gradient_start, before);
         assert_eq!(p.gradient_start_hex, "not-a-colour");
+    }
+
+    #[test]
+    fn fill_rgba_writes_palette_and_opaque_alpha() {
+        let colors = CLASSIC;
+        let map = [0, 2, 1];
+        let mut pixels = vec![0u8; 12];
+        fill_rgba_from_map(&map, &mut pixels, &colors);
+        assert_eq!(&pixels[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[4..8], &[255, 255, 255, 255]);
+        assert_eq!(&pixels[8..12], &[0, 0, 0, 255]);
+        assert_eq!(rgba_from_map(&map, &colors), pixels);
     }
 }
