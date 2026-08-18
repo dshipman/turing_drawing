@@ -1,6 +1,7 @@
 //! Shared tape plus one or more machines that step on it in order.
 
 use crate::machine::{validate_map_size, wrap_pos, Machine};
+use crate::tape::{self, TapeInit};
 
 pub use crate::machine::{
     default_machine_name, mutation_count, step_rate, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH,
@@ -31,6 +32,8 @@ pub struct Program {
     pub map: Vec<i32>,
     pub machines: Vec<Machine>,
     pub itr_count: u64,
+    /// How [`Self::reset`] fills the tape. Empty (all zeros) is the default.
+    pub tape_init: TapeInit,
 }
 
 impl Program {
@@ -63,6 +66,7 @@ impl Program {
             map: vec![0; width * height],
             machines: vec![machine],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -81,6 +85,7 @@ impl Program {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![parsed.machine],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -89,10 +94,29 @@ impl Program {
 
     pub fn reset(&mut self) {
         self.itr_count = 0;
-        self.map.fill(0);
+        tape::fill(
+            &mut self.map,
+            self.width,
+            self.height,
+            self.num_symbols,
+            &self.tape_init,
+        );
         for machine in &mut self.machines {
             machine.reset();
         }
+    }
+
+    /// Pick a new tape seed and refill from the current generator.
+    pub fn reseed_tape(&mut self) {
+        self.tape_init.reseed();
+        self.reset();
+    }
+
+    /// Replace the tape generator (keeps the seed unless `init` supplies another) and reset.
+    pub fn set_tape_init(&mut self, mut init: TapeInit) {
+        init.sanitize();
+        self.tape_init = init;
+        self.reset();
     }
 
     /// Resize the canvas, wrap start positions, and reset the drawing.
@@ -341,6 +365,7 @@ impl Program {
 mod tests {
     use super::*;
     use crate::machine::{Machine, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT};
+    use crate::tape::{TapeInit, TapeInitKind};
 
     fn fixed_machine(table: Vec<i32>, start_x: i32, start_y: i32) -> Machine {
         Machine {
@@ -374,6 +399,7 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![fixed_machine(table, start_x, start_y)],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         }
     }
 
@@ -560,6 +586,7 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![m0, m1],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         };
 
         p.update(1);
@@ -651,6 +678,7 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![fast, slow, normal, mid],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         };
 
         p.update(10);
@@ -675,6 +703,7 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![active, inactive],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         };
 
         p.update(5);
@@ -718,6 +747,7 @@ mod tests {
             map: vec![0; 80],
             machines: vec![fixed_machine(vec![0, 1, ACTION_LEFT], 9, 0)],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         };
         p.update(1);
         assert_eq!(p.machines[0].x_pos, 0);
@@ -938,5 +968,26 @@ mod tests {
         assert_eq!(p.machines[0].x_pos, p.machines[0].start_x);
         assert_eq!(p.machines[0].y_pos, p.machines[0].start_y);
         assert!(p.set_machine_start(3, 0, 0).is_err());
+    }
+
+    #[test]
+    fn reset_refills_from_seeded_tape_init() {
+        let mut p = Program::new_random(2, 4);
+        p.tape_init.kind = TapeInitKind::Uniform;
+        p.tape_init.seed = 123;
+        p.reset();
+        let first = p.map.clone();
+        assert!(first.iter().any(|&s| s != 0));
+        assert!(first.iter().all(|&s| s >= 0 && s < 4));
+
+        p.update(20);
+        assert_ne!(p.map, first);
+        p.reset();
+        assert_eq!(p.map, first);
+        assert_eq!(p.itr_count, 0);
+
+        p.reseed_tape();
+        assert_ne!(p.tape_init.seed, 123);
+        assert_ne!(p.map, first);
     }
 }

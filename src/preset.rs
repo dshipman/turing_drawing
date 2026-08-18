@@ -13,8 +13,9 @@ use crate::machine::{
 };
 use crate::program::Program;
 use crate::settings::PresetPerformanceBinding;
+use crate::tape::TapeInit;
 
-const PRESET_VERSION: u32 = 2;
+const PRESET_VERSION: u32 = 3;
 const MIN_PRESET_VERSION: u32 = 1;
 const PRESETS_SUBDIR: &str = "presets";
 
@@ -53,6 +54,9 @@ pub struct Preset {
     /// Per-machine performance shortcuts saved with this preset.
     #[serde(default)]
     pub performance_bindings: Vec<PresetPerformanceBinding>,
+    /// How Restart fills the canvas. Missing in older files (Empty).
+    #[serde(default)]
+    pub tape_init: TapeInit,
 }
 
 /// How the preset browser orders its list.
@@ -118,6 +122,7 @@ impl Program {
                 })
                 .collect(),
             performance_bindings: Vec::new(),
+            tape_init: self.tape_init.clone(),
         })
     }
 
@@ -157,6 +162,8 @@ impl Program {
             })
             .collect();
 
+        let mut tape_init = preset.tape_init.clone();
+        tape_init.sanitize();
         let mut prog = Self {
             num_states: preset.num_states,
             num_symbols: preset.num_symbols,
@@ -165,6 +172,7 @@ impl Program {
             map: vec![0; width * height],
             machines,
             itr_count: 0,
+            tape_init,
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -423,6 +431,7 @@ pub fn sort_preset_infos(infos: &mut [PresetInfo], sort: PresetSort) {
 mod tests {
     use super::*;
     use crate::machine::{ACTION_DOWN, ACTION_LEFT};
+    use crate::tape::{TapeInit, TapeInitKind};
     use std::sync::Mutex;
 
     // Serialize filesystem tests that touch a shared temp-style path via env override
@@ -470,6 +479,7 @@ mod tests {
             map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
             machines: vec![m0.clone(), m1.clone()],
             itr_count: 0,
+            tape_init: TapeInit::default(),
         };
         p.update(5);
         assert!(p.itr_count > 0);
@@ -517,6 +527,7 @@ mod tests {
                 table: vec![0, 1, 0, 0, 1, 0],
             }],
             performance_bindings: Vec::new(),
+            tape_init: TapeInit::default(),
         };
         assert!(validate_preset(&good).is_ok());
 
@@ -711,6 +722,7 @@ mod tests {
                 table: vec![0, 1, 0, 0, 1, 0],
             }],
             performance_bindings: Vec::new(),
+            tape_init: TapeInit::default(),
         };
         assert!(validate_preset(&bad).is_err());
         bad.map_width = 512;
@@ -740,5 +752,51 @@ mod tests {
         let loaded = load_preset(&unique).unwrap();
         assert!(loaded.saved_at > 0);
         delete_preset(&unique).unwrap();
+    }
+
+    #[test]
+    fn old_json_without_tape_init_loads_empty() {
+        let json = r#"{
+            "version": 2,
+            "name": "legacy tape",
+            "num_states": 1,
+            "num_symbols": 2,
+            "map_width": 512,
+            "map_height": 512,
+            "machines": [{"start_x": 0, "start_y": 0, "speed": 0.0, "table": [0, 1, 0, 0, 1, 0]}]
+        }"#;
+        let preset: Preset = serde_json::from_str(json).unwrap();
+        assert_eq!(preset.tape_init, TapeInit::default());
+        assert_eq!(preset.tape_init.kind, TapeInitKind::Empty);
+        let q = Program::from_preset(&preset).unwrap();
+        assert_eq!(q.tape_init.kind, TapeInitKind::Empty);
+        assert!(q.map.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn tape_init_roundtrips_in_preset() {
+        let mut p = Program::new_random(2, 4);
+        p.tape_init = TapeInit {
+            kind: TapeInitKind::Perlin,
+            seed: 77,
+            gaussian_mean: 0.3,
+            gaussian_sigma: 0.2,
+            perlin_scale: 16.0,
+            perlin_octaves: 3,
+        };
+        p.reset();
+        let first = p.map.clone();
+        assert!(first.iter().any(|&s| s != 0));
+
+        let preset = p.to_preset("noisy").unwrap();
+        assert_eq!(preset.version, PRESET_VERSION);
+        assert_eq!(preset.tape_init.kind, TapeInitKind::Perlin);
+        assert_eq!(preset.tape_init.seed, 77);
+
+        let q = Program::from_preset(&preset).unwrap();
+        assert_eq!(q.tape_init.kind, TapeInitKind::Perlin);
+        assert_eq!(q.tape_init.seed, 77);
+        assert_eq!(q.tape_init.perlin_scale, 16.0);
+        assert_eq!(q.map, first);
     }
 }

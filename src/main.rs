@@ -28,6 +28,10 @@ use turing_drawing::settings::{
     self, Action, BindTarget, PerformanceBindings, UserSettings, MAX_MAX_ITRS, MAX_REFRESH_HZ,
     MIN_MAX_ITRS, MIN_REFRESH_HZ,
 };
+use turing_drawing::tape::{
+    TapeInit, TapeInitKind, MAX_GAUSSIAN_MEAN, MAX_GAUSSIAN_SIGMA, MAX_PERLIN_OCTAVES,
+    MAX_PERLIN_SCALE, MIN_GAUSSIAN_MEAN, MIN_GAUSSIAN_SIGMA, MIN_PERLIN_OCTAVES, MIN_PERLIN_SCALE,
+};
 
 const REFRESH_PRESETS: [RefreshPreset; 6] = [
     RefreshPreset(30),
@@ -262,6 +266,12 @@ enum Message {
     ResolutionPreset(usize, usize),
     MapWidthText(String),
     MapHeightText(String),
+    TapeKind(TapeInitKind),
+    TapeGaussianMean(f32),
+    TapeGaussianSigma(f32),
+    TapePerlinScale(f32),
+    TapePerlinOctaves(f32),
+    ReseedTape,
     MaxItrsChanged(f32),
     RasterMode(RasterMode),
     Random,
@@ -333,6 +343,11 @@ enum Message {
     SettingsPalette(PaletteKind),
     SettingsGradientStart(String),
     SettingsGradientEnd(String),
+    SettingsTapeKind(TapeInitKind),
+    SettingsGaussianMean(f32),
+    SettingsGaussianSigma(f32),
+    SettingsPerlinScale(f32),
+    SettingsPerlinOctaves(f32),
 }
 
 impl App {
@@ -341,12 +356,19 @@ impl App {
         let defaults = settings.defaults.clone();
         let num_states = defaults.num_states;
         let num_symbols = defaults.num_symbols;
-        let program = Program::new_random_sized(
+        let mut program = Program::new_random_sized(
             num_states,
             num_symbols,
             defaults.map_width,
             defaults.map_height,
         );
+        program.set_tape_init(TapeInit::from_kind_and_params(
+            defaults.tape_kind,
+            defaults.gaussian_mean,
+            defaults.gaussian_sigma,
+            defaults.perlin_scale,
+            defaults.perlin_octaves,
+        ));
         let share_texts = vec![program.machine_encoding(0)];
         let mut palette = Palette::classic();
         let _ = palette.set_gradient_start_hex(defaults.gradient_start.clone(), num_symbols);
@@ -559,6 +581,7 @@ impl App {
             Action::Random => self.update(Message::Random),
             Action::Mutate => self.update(Message::Mutate),
             Action::Restart => self.update(Message::Restart),
+            Action::ReseedTape => self.update(Message::ReseedTape),
             Action::OpenPresets => self.update(Message::OpenPresetBrowser),
             Action::OpenSettings => self.update(Message::OpenSettings),
             Action::ToggleFullscreen => self.update(Message::ToggleFullscreen),
@@ -734,6 +757,49 @@ impl App {
             Message::MapHeightText(text) => {
                 self.map_height_text = text;
                 self.try_apply_custom_resolution();
+                Task::none()
+            }
+            Message::TapeKind(kind) => {
+                if self.program.tape_init.kind != kind {
+                    self.program.tape_init.kind = kind;
+                    self.program.reset();
+                    self.status = format!("Tape: {kind}; drawing reset");
+                    self.refresh_frame();
+                }
+                Task::none()
+            }
+            Message::TapeGaussianMean(value) => {
+                self.program.tape_init.gaussian_mean = value;
+                self.program.tape_init.sanitize();
+                self.program.reset();
+                self.refresh_frame();
+                Task::none()
+            }
+            Message::TapeGaussianSigma(value) => {
+                self.program.tape_init.gaussian_sigma = value;
+                self.program.tape_init.sanitize();
+                self.program.reset();
+                self.refresh_frame();
+                Task::none()
+            }
+            Message::TapePerlinScale(value) => {
+                self.program.tape_init.perlin_scale = value;
+                self.program.tape_init.sanitize();
+                self.program.reset();
+                self.refresh_frame();
+                Task::none()
+            }
+            Message::TapePerlinOctaves(value) => {
+                self.program.tape_init.perlin_octaves = value.round() as u8;
+                self.program.tape_init.sanitize();
+                self.program.reset();
+                self.refresh_frame();
+                Task::none()
+            }
+            Message::ReseedTape => {
+                self.program.reseed_tape();
+                self.status = "Tape reseeded; drawing reset".into();
+                self.refresh_frame();
                 Task::none()
             }
             Message::MaxItrsChanged(value) => {
@@ -1144,7 +1210,7 @@ impl App {
                     self.status = format!("Store failed: {e}");
                     Task::none()
                 }
-            }
+            },
             Message::LoadPreset(name) => match preset::load_preset(&name) {
                 Ok(preset) => match Program::from_preset(&preset) {
                     Ok(program) => {
@@ -1400,6 +1466,36 @@ impl App {
                         self.status = format!("End colour: {e}");
                     }
                 }
+                Task::none()
+            }
+            Message::SettingsTapeKind(kind) => {
+                self.settings.defaults.tape_kind = kind;
+                self.persist_settings();
+                self.status.clear();
+                Task::none()
+            }
+            Message::SettingsGaussianMean(value) => {
+                self.settings.defaults.gaussian_mean =
+                    value.clamp(MIN_GAUSSIAN_MEAN, MAX_GAUSSIAN_MEAN);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsGaussianSigma(value) => {
+                self.settings.defaults.gaussian_sigma =
+                    value.clamp(MIN_GAUSSIAN_SIGMA, MAX_GAUSSIAN_SIGMA);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsPerlinScale(value) => {
+                self.settings.defaults.perlin_scale =
+                    value.clamp(MIN_PERLIN_SCALE, MAX_PERLIN_SCALE);
+                self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsPerlinOctaves(value) => {
+                self.settings.defaults.perlin_octaves =
+                    (value.round() as u8).clamp(MIN_PERLIN_OCTAVES, MAX_PERLIN_OCTAVES);
+                self.persist_settings();
                 Task::none()
             }
         }
@@ -1828,7 +1924,8 @@ impl App {
     }
 
     fn canvas_group(&self) -> Element<'_, Message> {
-        column![
+        let init = &self.program.tape_init;
+        let mut col = column![
             inspector_row(
                 "States",
                 stepper(
@@ -1884,9 +1981,105 @@ impl App {
                 .spacing(6)
                 .align_y(Alignment::Center),
             ),
+            inspector_row(
+                "Init",
+                chrome::decorate_pick_list(
+                    pick_list(TapeInitKind::ALL, Some(init.kind), Message::TapeKind)
+                        .width(Length::Fill),
+                ),
+            ),
         ]
-        .spacing(6)
-        .into()
+        .spacing(6);
+
+        match init.kind {
+            TapeInitKind::Gaussian => {
+                col = col
+                    .push(inspector_row(
+                        "Mean",
+                        row![
+                            slider(
+                                MIN_GAUSSIAN_MEAN..=MAX_GAUSSIAN_MEAN,
+                                init.gaussian_mean,
+                                Message::TapeGaussianMean,
+                            )
+                            .step(0.01_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(format!("{:.2}", init.gaussian_mean))
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ))
+                    .push(inspector_row(
+                        "Sigma",
+                        row![
+                            slider(
+                                MIN_GAUSSIAN_SIGMA..=MAX_GAUSSIAN_SIGMA,
+                                init.gaussian_sigma,
+                                Message::TapeGaussianSigma,
+                            )
+                            .step(0.01_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(format!("{:.2}", init.gaussian_sigma))
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ));
+            }
+            TapeInitKind::Perlin => {
+                col = col
+                    .push(inspector_row(
+                        "Scale",
+                        row![
+                            slider(
+                                MIN_PERLIN_SCALE..=MAX_PERLIN_SCALE,
+                                init.perlin_scale,
+                                Message::TapePerlinScale,
+                            )
+                            .step(1.0_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(format!("{:.0}", init.perlin_scale))
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ))
+                    .push(inspector_row(
+                        "Octaves",
+                        row![
+                            slider(
+                                f32::from(MIN_PERLIN_OCTAVES)..=f32::from(MAX_PERLIN_OCTAVES),
+                                f32::from(init.perlin_octaves),
+                                Message::TapePerlinOctaves,
+                            )
+                            .step(1.0_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(init.perlin_octaves.to_string())
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ));
+            }
+            TapeInitKind::Empty | TapeInitKind::Uniform => {}
+        }
+
+        if init.kind != TapeInitKind::Empty {
+            col = col.push(inspector_row(
+                "",
+                bindable(
+                    chrome::compact_button("Reseed").on_press(Message::ReseedTape),
+                    BindTarget::global(Action::ReseedTape),
+                ),
+            ));
+        }
+
+        col.into()
     }
 
     fn palette_group(&self) -> Element<'_, Message> {
@@ -2122,7 +2315,7 @@ impl App {
                     ),
                 ]
                 .align_y(Alignment::Center),
-                chrome::dim("Store rules, starts, speeds, and canvas size. Load replaces the current machines."),
+                chrome::dim("Store rules, starts, speeds, canvas size, and tape init. Load replaces the current machines."),
                 row![
                     chrome::field("Preset name", &self.preset_name)
                         .on_input(Message::PresetNameChanged)
@@ -2250,6 +2443,96 @@ impl App {
                 ));
         }
 
+        let mut canvas_init = column![inspector_row(
+            "Init",
+            chrome::decorate_pick_list(
+                pick_list(
+                    TapeInitKind::ALL,
+                    Some(d.tape_kind),
+                    Message::SettingsTapeKind,
+                )
+                .width(Length::Fill),
+            ),
+        )]
+        .spacing(6);
+        match d.tape_kind {
+            TapeInitKind::Gaussian => {
+                canvas_init = canvas_init
+                    .push(inspector_row(
+                        "Mean",
+                        row![
+                            slider(
+                                MIN_GAUSSIAN_MEAN..=MAX_GAUSSIAN_MEAN,
+                                d.gaussian_mean,
+                                Message::SettingsGaussianMean,
+                            )
+                            .step(0.01_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(format!("{:.2}", d.gaussian_mean))
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ))
+                    .push(inspector_row(
+                        "Sigma",
+                        row![
+                            slider(
+                                MIN_GAUSSIAN_SIGMA..=MAX_GAUSSIAN_SIGMA,
+                                d.gaussian_sigma,
+                                Message::SettingsGaussianSigma,
+                            )
+                            .step(0.01_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(format!("{:.2}", d.gaussian_sigma))
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ));
+            }
+            TapeInitKind::Perlin => {
+                canvas_init = canvas_init
+                    .push(inspector_row(
+                        "Scale",
+                        row![
+                            slider(
+                                MIN_PERLIN_SCALE..=MAX_PERLIN_SCALE,
+                                d.perlin_scale,
+                                Message::SettingsPerlinScale,
+                            )
+                            .step(1.0_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(format!("{:.0}", d.perlin_scale))
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ))
+                    .push(inspector_row(
+                        "Octaves",
+                        row![
+                            slider(
+                                f32::from(MIN_PERLIN_OCTAVES)..=f32::from(MAX_PERLIN_OCTAVES),
+                                f32::from(d.perlin_octaves),
+                                Message::SettingsPerlinOctaves,
+                            )
+                            .step(1.0_f32)
+                            .style(chrome::slider_style),
+                            chrome::dim(d.perlin_octaves.to_string())
+                                .width(36)
+                                .align_x(Alignment::End),
+                        ]
+                        .spacing(6)
+                        .align_y(Alignment::Center),
+                    ));
+            }
+            TapeInitKind::Empty | TapeInitKind::Uniform => {}
+        }
+
         column![
             chrome::dim("CANVAS"),
             inspector_row(
@@ -2300,6 +2583,7 @@ impl App {
                 .spacing(6)
                 .align_y(Alignment::Center),
             ),
+            canvas_init,
             chrome::hrule(),
             chrome::dim("PALETTE"),
             palette_block,

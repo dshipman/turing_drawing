@@ -9,3 +9,4 @@ pub mod palette;
 pub mod preset;
 pub mod program;
 pub mod settings;
+pub mod tape;

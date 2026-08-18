@@ -14,6 +14,11 @@ use crate::machine::{
 use crate::palette::{
     parse_hex_rgb, rgb_to_hex, PaletteKind, DEFAULT_GRADIENT_END, DEFAULT_GRADIENT_START,
 };
+use crate::tape::{
+    TapeInitKind, DEFAULT_GAUSSIAN_MEAN, DEFAULT_GAUSSIAN_SIGMA, DEFAULT_PERLIN_OCTAVES,
+    DEFAULT_PERLIN_SCALE, MAX_GAUSSIAN_MEAN, MAX_GAUSSIAN_SIGMA, MAX_PERLIN_OCTAVES,
+    MAX_PERLIN_SCALE, MIN_GAUSSIAN_MEAN, MIN_GAUSSIAN_SIGMA, MIN_PERLIN_OCTAVES, MIN_PERLIN_SCALE,
+};
 
 const SETTINGS_VERSION: u32 = 1;
 const APP_DIR: &str = "turing_drawing";
@@ -70,13 +75,15 @@ pub enum Action {
     RemoveMachine,
     LoadPreset,
     DeletePreset,
+    ReseedTape,
 }
 
 impl Action {
-    pub const GLOBAL: [Action; 21] = [
+    pub const GLOBAL: [Action; 22] = [
         Self::Random,
         Self::Mutate,
         Self::Restart,
+        Self::ReseedTape,
         Self::OpenPresets,
         Self::OpenSettings,
         Self::ToggleFullscreen,
@@ -115,6 +122,7 @@ impl Action {
             Self::Random => "Random",
             Self::Mutate => "Mutate",
             Self::Restart => "Restart",
+            Self::ReseedTape => "Reseed tape",
             Self::OpenPresets => "Presets",
             Self::OpenSettings => "Settings",
             Self::ToggleFullscreen => "Toggle fullscreen",
@@ -460,9 +468,9 @@ pub struct PerformanceBindings {
 impl PerformanceBindings {
     pub fn binding_for(&self, target: &BindTarget) -> Option<&Keybinding> {
         let id = target.machine_id?;
-        self.bindings.iter().find(|b| {
-            b.action == target.action && b.machine_id == Some(id)
-        })
+        self.bindings
+            .iter()
+            .find(|b| b.action == target.action && b.machine_id == Some(id))
     }
 
     pub fn set_binding(&mut self, binding: Keybinding) {
@@ -476,14 +484,12 @@ impl PerformanceBindings {
         let Some(id) = target.machine_id else {
             return;
         };
-        self.bindings.retain(|b| {
-            b.action != target.action || b.machine_id != Some(id)
-        });
+        self.bindings
+            .retain(|b| b.action != target.action || b.machine_id != Some(id));
     }
 
     pub fn clear_machine(&mut self, machine_id: u64) {
-        self.bindings
-            .retain(|b| b.machine_id != Some(machine_id));
+        self.bindings.retain(|b| b.machine_id != Some(machine_id));
     }
 
     pub fn retain_machine_ids(&mut self, ids: &[u64]) {
@@ -494,15 +500,10 @@ impl PerformanceBindings {
     }
 
     pub fn match_binding(&self, key: &Key, modifiers: Modifiers) -> Option<&Keybinding> {
-        self.bindings
-            .iter()
-            .find(|b| b.matches(key, modifiers))
+        self.bindings.iter().find(|b| b.matches(key, modifiers))
     }
 
-    pub fn to_preset_bindings(
-        &self,
-        machine_ids: &[u64],
-    ) -> Vec<PresetPerformanceBinding> {
+    pub fn to_preset_bindings(&self, machine_ids: &[u64]) -> Vec<PresetPerformanceBinding> {
         self.bindings
             .iter()
             .filter_map(|b| {
@@ -575,6 +576,16 @@ pub struct PanelDefaults {
     pub map_width: usize,
     #[serde(default = "default_map_height")]
     pub map_height: usize,
+    #[serde(default)]
+    pub tape_kind: TapeInitKind,
+    #[serde(default = "default_gaussian_mean")]
+    pub gaussian_mean: f32,
+    #[serde(default = "default_gaussian_sigma")]
+    pub gaussian_sigma: f32,
+    #[serde(default = "default_perlin_scale")]
+    pub perlin_scale: f32,
+    #[serde(default = "default_perlin_octaves")]
+    pub perlin_octaves: u8,
     #[serde(default = "default_speed")]
     pub speed: f32,
     #[serde(default = "default_refresh_hz")]
@@ -618,6 +629,18 @@ fn default_gradient_start() -> String {
 fn default_gradient_end() -> String {
     rgb_to_hex(DEFAULT_GRADIENT_END)
 }
+fn default_gaussian_mean() -> f32 {
+    DEFAULT_GAUSSIAN_MEAN
+}
+fn default_gaussian_sigma() -> f32 {
+    DEFAULT_GAUSSIAN_SIGMA
+}
+fn default_perlin_scale() -> f32 {
+    DEFAULT_PERLIN_SCALE
+}
+fn default_perlin_octaves() -> u8 {
+    DEFAULT_PERLIN_OCTAVES
+}
 
 impl Default for PanelDefaults {
     fn default() -> Self {
@@ -626,6 +649,11 @@ impl Default for PanelDefaults {
             num_symbols: default_num_symbols(),
             map_width: default_map_width(),
             map_height: default_map_height(),
+            tape_kind: TapeInitKind::Empty,
+            gaussian_mean: default_gaussian_mean(),
+            gaussian_sigma: default_gaussian_sigma(),
+            perlin_scale: default_perlin_scale(),
+            perlin_octaves: default_perlin_octaves(),
             speed: default_speed(),
             refresh_hz: default_refresh_hz(),
             max_itrs: default_max_itrs(),
@@ -643,6 +671,27 @@ impl PanelDefaults {
         self.num_symbols = self.num_symbols.clamp(MIN_SYMBOLS, MAX_SYMBOLS);
         self.map_width = self.map_width.clamp(MIN_MAP_SIZE, MAX_MAP_SIZE);
         self.map_height = self.map_height.clamp(MIN_MAP_SIZE, MAX_MAP_SIZE);
+        self.gaussian_mean = clamp_finite(
+            self.gaussian_mean,
+            MIN_GAUSSIAN_MEAN,
+            MAX_GAUSSIAN_MEAN,
+            DEFAULT_GAUSSIAN_MEAN,
+        );
+        self.gaussian_sigma = clamp_finite(
+            self.gaussian_sigma,
+            MIN_GAUSSIAN_SIGMA,
+            MAX_GAUSSIAN_SIGMA,
+            DEFAULT_GAUSSIAN_SIGMA,
+        );
+        self.perlin_scale = clamp_finite(
+            self.perlin_scale,
+            MIN_PERLIN_SCALE,
+            MAX_PERLIN_SCALE,
+            DEFAULT_PERLIN_SCALE,
+        );
+        self.perlin_octaves = self
+            .perlin_octaves
+            .clamp(MIN_PERLIN_OCTAVES, MAX_PERLIN_OCTAVES);
         if !self.speed.is_finite() {
             self.speed = default_speed();
         } else {
@@ -658,6 +707,14 @@ impl PanelDefaults {
             Ok(rgb) => self.gradient_end = rgb_to_hex(rgb),
             Err(_) => self.gradient_end = default_gradient_end(),
         }
+    }
+}
+
+fn clamp_finite(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(min, max)
+    } else {
+        fallback
     }
 }
 
@@ -768,9 +825,8 @@ impl UserSettings {
         if target.machine_id.is_some() {
             return;
         }
-        self.keybindings.retain(|b| {
-            b.action != target.action || b.preset_name != target.preset_name
-        });
+        self.keybindings
+            .retain(|b| b.action != target.action || b.preset_name != target.preset_name);
     }
 
     pub fn clear_preset(&mut self, name: &str) {
