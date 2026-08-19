@@ -24,11 +24,12 @@ use turing_drawing::program::{
     MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES, MIN_SYMBOLS,
 };
 use turing_drawing::settings::{
-    self, Action, BindTarget, PerformanceBindings, UserSettings, MAX_MAX_ITRS, MAX_REFRESH_HZ,
-    MIN_MAX_ITRS, MIN_REFRESH_HZ,
+    self, Action, BindTarget, PerformanceBindings, UserSettings, DEFAULT_MAX_ITRS, MAX_MAX_ITRS,
+    MAX_REFRESH_HZ, MIN_MAX_ITRS, MIN_REFRESH_HZ,
 };
 use turing_drawing::tape::{
-    TapeInit, TapeInitKind, MAX_GAUSSIAN_MEAN, MAX_GAUSSIAN_SIGMA, MAX_PERLIN_OCTAVES,
+    TapeInit, TapeInitKind, DEFAULT_GAUSSIAN_MEAN, DEFAULT_GAUSSIAN_SIGMA, DEFAULT_PERLIN_OCTAVES,
+    DEFAULT_PERLIN_SCALE, MAX_GAUSSIAN_MEAN, MAX_GAUSSIAN_SIGMA, MAX_PERLIN_OCTAVES,
     MAX_PERLIN_SCALE, MIN_GAUSSIAN_MEAN, MIN_GAUSSIAN_SIGMA, MIN_PERLIN_OCTAVES, MIN_PERLIN_SCALE,
 };
 
@@ -1982,14 +1983,17 @@ impl App {
                     BindTarget::global(Action::Mutate),
                 ),
                 chrome::dim("Mutate %"),
-                slider(
-                    f32::from(MIN_MUTATE_PERCENT)..=f32::from(MAX_MUTATE_PERCENT),
-                    self.mutate_percent,
-                    Message::MutatePercent,
-                )
-                .step(1.0_f32)
-                .width(100)
-                .style(chrome::slider_style),
+                chrome::resettable_slider(
+                    slider(
+                        f32::from(MIN_MUTATE_PERCENT)..=f32::from(MAX_MUTATE_PERCENT),
+                        self.mutate_percent,
+                        Message::MutatePercent,
+                    )
+                    .step(1.0_f32)
+                    .width(100)
+                    .style(chrome::slider_style),
+                    Message::MutatePercent(f32::from(DEFAULT_MUTATE_PERCENT)),
+                ),
                 chrome::dim(format!("{:.0}%", self.mutate_percent)).width(36),
                 bindable(
                     chrome::compact_button("Restart").on_press(Message::Restart),
@@ -2235,13 +2239,13 @@ impl App {
                     .push(inspector_row(
                         "Mean",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 MIN_GAUSSIAN_MEAN..=MAX_GAUSSIAN_MEAN,
                                 init.gaussian_mean,
+                                0.01_f32,
                                 Message::TapeGaussianMean,
-                            )
-                            .step(0.01_f32)
-                            .style(chrome::slider_style),
+                                Message::TapeGaussianMean(DEFAULT_GAUSSIAN_MEAN),
+                            ),
                             chrome::dim(format!("{:.2}", init.gaussian_mean))
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2252,13 +2256,13 @@ impl App {
                     .push(inspector_row(
                         "Sigma",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 MIN_GAUSSIAN_SIGMA..=MAX_GAUSSIAN_SIGMA,
                                 init.gaussian_sigma,
+                                0.01_f32,
                                 Message::TapeGaussianSigma,
-                            )
-                            .step(0.01_f32)
-                            .style(chrome::slider_style),
+                                Message::TapeGaussianSigma(DEFAULT_GAUSSIAN_SIGMA),
+                            ),
                             chrome::dim(format!("{:.2}", init.gaussian_sigma))
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2272,13 +2276,13 @@ impl App {
                     .push(inspector_row(
                         "Scale",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 MIN_PERLIN_SCALE..=MAX_PERLIN_SCALE,
                                 init.perlin_scale,
+                                1.0_f32,
                                 Message::TapePerlinScale,
-                            )
-                            .step(1.0_f32)
-                            .style(chrome::slider_style),
+                                Message::TapePerlinScale(DEFAULT_PERLIN_SCALE),
+                            ),
                             chrome::dim(format!("{:.0}", init.perlin_scale))
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2289,13 +2293,13 @@ impl App {
                     .push(inspector_row(
                         "Octaves",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 f32::from(MIN_PERLIN_OCTAVES)..=f32::from(MAX_PERLIN_OCTAVES),
                                 f32::from(init.perlin_octaves),
+                                1.0_f32,
                                 Message::TapePerlinOctaves,
-                            )
-                            .step(1.0_f32)
-                            .style(chrome::slider_style),
+                                Message::TapePerlinOctaves(f32::from(DEFAULT_PERLIN_OCTAVES)),
+                            ),
                             chrome::dim(init.perlin_octaves.to_string())
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2347,9 +2351,13 @@ impl App {
             inspector_row(
                 "Speed",
                 row![
-                    slider(0.0..=1.0, self.speed, Message::SpeedChanged)
-                        .step(0.01_f32)
-                        .style(chrome::slider_style),
+                    chrome::param_slider(
+                        0.0..=1.0,
+                        self.speed,
+                        0.01_f32,
+                        Message::SpeedChanged,
+                        Message::SpeedChanged(1.0),
+                    ),
                     chrome::dim(format!("{:.2}", self.speed))
                         .width(36)
                         .align_x(Alignment::End),
@@ -2386,13 +2394,13 @@ impl App {
             inspector_row(
                 "Max itrs",
                 row![
-                    slider(
+                    chrome::param_slider(
                         MIN_MAX_ITRS as f32..=MAX_MAX_ITRS as f32,
                         self.max_itrs as f32,
+                        1_000.0_f32,
                         Message::MaxItrsChanged,
-                    )
-                    .step(1_000.0_f32)
-                    .style(chrome::slider_style),
+                        Message::MaxItrsChanged(DEFAULT_MAX_ITRS as f32),
+                    ),
                     chrome::dim(self.max_itrs.to_string())
                         .width(64)
                         .align_x(Alignment::End),
@@ -2714,13 +2722,13 @@ impl App {
                     .push(inspector_row(
                         "Mean",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 MIN_GAUSSIAN_MEAN..=MAX_GAUSSIAN_MEAN,
                                 d.gaussian_mean,
+                                0.01_f32,
                                 Message::SettingsGaussianMean,
-                            )
-                            .step(0.01_f32)
-                            .style(chrome::slider_style),
+                                Message::SettingsGaussianMean(DEFAULT_GAUSSIAN_MEAN),
+                            ),
                             chrome::dim(format!("{:.2}", d.gaussian_mean))
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2731,13 +2739,13 @@ impl App {
                     .push(inspector_row(
                         "Sigma",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 MIN_GAUSSIAN_SIGMA..=MAX_GAUSSIAN_SIGMA,
                                 d.gaussian_sigma,
+                                0.01_f32,
                                 Message::SettingsGaussianSigma,
-                            )
-                            .step(0.01_f32)
-                            .style(chrome::slider_style),
+                                Message::SettingsGaussianSigma(DEFAULT_GAUSSIAN_SIGMA),
+                            ),
                             chrome::dim(format!("{:.2}", d.gaussian_sigma))
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2751,13 +2759,13 @@ impl App {
                     .push(inspector_row(
                         "Scale",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 MIN_PERLIN_SCALE..=MAX_PERLIN_SCALE,
                                 d.perlin_scale,
+                                1.0_f32,
                                 Message::SettingsPerlinScale,
-                            )
-                            .step(1.0_f32)
-                            .style(chrome::slider_style),
+                                Message::SettingsPerlinScale(DEFAULT_PERLIN_SCALE),
+                            ),
                             chrome::dim(format!("{:.0}", d.perlin_scale))
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2768,13 +2776,13 @@ impl App {
                     .push(inspector_row(
                         "Octaves",
                         row![
-                            slider(
+                            chrome::param_slider(
                                 f32::from(MIN_PERLIN_OCTAVES)..=f32::from(MAX_PERLIN_OCTAVES),
                                 f32::from(d.perlin_octaves),
+                                1.0_f32,
                                 Message::SettingsPerlinOctaves,
-                            )
-                            .step(1.0_f32)
-                            .style(chrome::slider_style),
+                                Message::SettingsPerlinOctaves(f32::from(DEFAULT_PERLIN_OCTAVES)),
+                            ),
                             chrome::dim(d.perlin_octaves.to_string())
                                 .width(36)
                                 .align_x(Alignment::End),
@@ -2845,9 +2853,13 @@ impl App {
             inspector_row(
                 "Speed",
                 row![
-                    slider(0.0..=1.0, d.speed, Message::SettingsSpeed)
-                        .step(0.01_f32)
-                        .style(chrome::slider_style),
+                    chrome::param_slider(
+                        0.0..=1.0,
+                        d.speed,
+                        0.01_f32,
+                        Message::SettingsSpeed,
+                        Message::SettingsSpeed(1.0),
+                    ),
                     chrome::dim(format!("{:.2}", d.speed))
                         .width(36)
                         .align_x(Alignment::End),
@@ -2884,13 +2896,13 @@ impl App {
             inspector_row(
                 "Max itrs",
                 row![
-                    slider(
+                    chrome::param_slider(
                         MIN_MAX_ITRS as f32..=MAX_MAX_ITRS as f32,
                         d.max_itrs as f32,
+                        1_000.0_f32,
                         Message::SettingsMaxItrs,
-                    )
-                    .step(1_000.0_f32)
-                    .style(chrome::slider_style),
+                        Message::SettingsMaxItrs(DEFAULT_MAX_ITRS as f32),
+                    ),
                     chrome::dim(d.max_itrs.to_string())
                         .width(64)
                         .align_x(Alignment::End),
@@ -3123,11 +3135,13 @@ fn machine_active_toggler(index: usize, active: bool) -> Element<'static, Messag
 
 fn machine_speed_slider(index: usize, speed: f32) -> Element<'static, Message> {
     row![
-        slider(MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED, speed, move |v| {
-            Message::MachineSpeedChanged(index, v)
-        })
-        .step(0.1_f32)
-        .style(chrome::slider_style),
+        chrome::param_slider(
+            MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED,
+            speed,
+            0.1_f32,
+            move |v| Message::MachineSpeedChanged(index, v),
+            Message::MachineSpeedChanged(index, 0.0),
+        ),
         chrome::dim(machine_speed_label(speed))
             .width(72)
             .align_x(Alignment::End),
