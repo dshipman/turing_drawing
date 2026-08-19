@@ -7,8 +7,8 @@ use iced::widget::{
     toggler, Space,
 };
 use iced::{
-    clipboard, event, keyboard, mouse, time, window, Alignment, Element, Event, Length, Size,
-    Subscription, Task, Theme,
+    clipboard, event, keyboard, mouse, time, window, Alignment, Element, Event, Length, Point,
+    Size, Subscription, Task, Theme,
 };
 
 use turing_drawing::chrome;
@@ -45,6 +45,13 @@ const CHUNK: usize = 5_000;
 const MODE_SWITCH_SETTLE: Duration = Duration::from_millis(100);
 /// Fallback cap if no resize events arrive during a mode switch.
 const MODE_SWITCH_PAUSE_MAX: Duration = Duration::from_millis(800);
+const WINDOW_DEFAULT: Size = Size::new(1100.0, 720.0);
+const WINDOW_MIN: Size = Size::new(900.0, 560.0);
+const SETTINGS_OVERLAY_DEFAULT: Size = Size::new(560.0, 490.0);
+const SETTINGS_OVERLAY_MIN: Size = Size::new(480.0, 280.0);
+const PRESET_OVERLAY_DEFAULT: Size = Size::new(520.0, 460.0);
+const PRESET_OVERLAY_MIN: Size = Size::new(400.0, 240.0);
+const OVERLAY_WINDOW_MARGIN: f32 = 40.0;
 const RESOLUTION_PRESETS: [ResolutionPreset; 18] = [
     ResolutionPreset::square(512, "512 × 512"),
     ResolutionPreset::square(1024, "1024 × 1024"),
@@ -78,6 +85,19 @@ impl std::fmt::Display for RefreshPreset {
 fn frame_period(hz: u32) -> Duration {
     let hz = hz.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ);
     Duration::from_secs_f64(1.0 / f64::from(hz))
+}
+
+fn clamp_overlay_size(size: Size, min: Size, window: Size) -> Size {
+    Size::new(
+        size.width.clamp(
+            min.width,
+            (window.width - OVERLAY_WINDOW_MARGIN).max(min.width),
+        ),
+        size.height.clamp(
+            min.height,
+            (window.height - OVERLAY_WINDOW_MARGIN).max(min.height),
+        ),
+    )
 }
 
 fn parse_refresh_hz(text: &str) -> Result<u32, String> {
@@ -139,8 +159,8 @@ fn main() -> iced::Result {
         .theme(theme)
         .subscription(App::subscription)
         .window(window::Settings {
-            size: Size::new(1100.0, 720.0),
-            min_size: Some(Size::new(900.0, 560.0)),
+            size: WINDOW_DEFAULT,
+            min_size: Some(WINDOW_MIN),
             ..Default::default()
         })
         .run()
@@ -152,7 +172,7 @@ fn theme(_app: &App) -> Theme {
 
 fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Message> {
     if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
-        return Some(Message::MachineDragEnd);
+        return Some(Message::PointerReleased);
     }
     if status == event::Status::Captured {
         return None;
@@ -212,6 +232,14 @@ struct App {
     dragging_machine: Option<usize>,
     /// Whether the preset browser overlay is open.
     preset_browser_open: bool,
+    /// Session size of the settings overlay.
+    settings_overlay_size: Size,
+    /// Session size of the preset browser overlay.
+    preset_overlay_size: Size,
+    /// Latest OS window size, used to clamp overlay dialogs.
+    window_size: Size,
+    /// In-progress overlay resize drag, if any.
+    overlay_resize: Option<OverlayResize>,
     /// Name field for storing a new/overwrite preset.
     preset_name: String,
     /// Cached list of presets on disk (refreshed when the browser opens or changes).
@@ -257,6 +285,18 @@ enum SettingsTab {
     Keybindings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    Settings,
+    Presets,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OverlayResize {
+    kind: OverlayKind,
+    last_cursor: Option<Point>,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
     Tick,
@@ -291,7 +331,10 @@ enum Message {
     MachineNameChanged(usize, String),
     MachineDragStart(usize),
     MachineDragOver(usize),
-    MachineDragEnd,
+    PointerReleased,
+    OverlayResizeStart(OverlayKind),
+    OverlayResizeMove(Point),
+    OverlayResizeEnd,
     MachineSpeedChanged(usize, f32),
     ToggleMachineActive(usize, bool),
     TogglePickStart(usize),
@@ -307,7 +350,7 @@ enum Message {
     ToggleDrawingOnly,
     ToggleFullscreen,
     PauseForModeSwitch,
-    WindowResized,
+    WindowResized(Size),
     Escape,
     PaletteSelected(PaletteKind),
     GradientStartChanged(String),
@@ -414,6 +457,10 @@ impl App {
                 selected_machine: None,
                 dragging_machine: None,
                 preset_browser_open: false,
+                settings_overlay_size: SETTINGS_OVERLAY_DEFAULT,
+                preset_overlay_size: PRESET_OVERLAY_DEFAULT,
+                window_size: WINDOW_DEFAULT,
+                overlay_resize: None,
                 preset_name: String::new(),
                 preset_list: Vec::new(),
                 preset_sort: PresetSort::DateSaved,
@@ -466,7 +513,7 @@ impl App {
         Subscription::batch([
             tick,
             event::listen_with(on_event),
-            window::resize_events().map(|(_id, _size)| Message::WindowResized),
+            window::resize_events().map(|(_id, size)| Message::WindowResized(size)),
         ])
     }
 
@@ -499,6 +546,29 @@ impl App {
         if let Err(e) = self.settings.save() {
             self.status = format!("Could not save settings: {e}");
         }
+    }
+
+    fn overlay_size(&self, kind: OverlayKind) -> Size {
+        match kind {
+            OverlayKind::Settings => self.settings_overlay_size,
+            OverlayKind::Presets => self.preset_overlay_size,
+        }
+    }
+
+    fn set_overlay_size(&mut self, kind: OverlayKind, size: Size) {
+        let min = match kind {
+            OverlayKind::Settings => SETTINGS_OVERLAY_MIN,
+            OverlayKind::Presets => PRESET_OVERLAY_MIN,
+        };
+        let clamped = clamp_overlay_size(size, min, self.window_size);
+        match kind {
+            OverlayKind::Settings => self.settings_overlay_size = clamped,
+            OverlayKind::Presets => self.preset_overlay_size = clamped,
+        }
+    }
+
+    fn end_overlay_resize(&mut self) {
+        self.overlay_resize = None;
     }
 
     fn forget_machine_bindings(&mut self, id: u64) {
@@ -1022,8 +1092,46 @@ impl App {
                     }
                 }
             }
-            Message::MachineDragEnd => {
+            Message::PointerReleased => {
                 self.dragging_machine = None;
+                self.end_overlay_resize();
+                Task::none()
+            }
+            Message::OverlayResizeStart(kind) => {
+                self.overlay_resize = Some(OverlayResize {
+                    kind,
+                    last_cursor: None,
+                });
+                Task::none()
+            }
+            Message::OverlayResizeMove(point) => {
+                let Some(resize) = self.overlay_resize else {
+                    return Task::none();
+                };
+                let Some(last) = resize.last_cursor else {
+                    self.overlay_resize = Some(OverlayResize {
+                        kind: resize.kind,
+                        last_cursor: Some(point),
+                    });
+                    return Task::none();
+                };
+                let kind = resize.kind;
+                self.overlay_resize = Some(OverlayResize {
+                    kind,
+                    last_cursor: Some(point),
+                });
+                let current = self.overlay_size(kind);
+                self.set_overlay_size(
+                    kind,
+                    Size::new(
+                        current.width + (point.x - last.x) * 2.0,
+                        current.height + (point.y - last.y) * 2.0,
+                    ),
+                );
+                Task::none()
+            }
+            Message::OverlayResizeEnd => {
+                self.end_overlay_resize();
                 Task::none()
             }
             Message::MachineSpeedChanged(i, speed) => {
@@ -1098,7 +1206,10 @@ impl App {
                 self.pause_for_mode_switch();
                 Task::none()
             }
-            Message::WindowResized => {
+            Message::WindowResized(size) => {
+                self.window_size = size;
+                self.set_overlay_size(OverlayKind::Settings, self.settings_overlay_size);
+                self.set_overlay_size(OverlayKind::Presets, self.preset_overlay_size);
                 self.note_mode_switch_resize();
                 Task::none()
             }
@@ -1115,6 +1226,7 @@ impl App {
                 }
                 if self.settings_open {
                     self.settings_open = false;
+                    self.end_overlay_resize();
                     return Task::none();
                 }
                 if self.picking_start.is_some() {
@@ -1124,6 +1236,7 @@ impl App {
                 }
                 if self.preset_browser_open {
                     self.preset_browser_open = false;
+                    self.end_overlay_resize();
                     return Task::none();
                 }
                 if self.dragging_machine.is_some() {
@@ -1284,12 +1397,14 @@ impl App {
                 self.machine_color_picker.close();
                 self.settings_open = false;
                 self.capturing_action = None;
+                self.end_overlay_resize();
                 self.preset_browser_open = true;
                 self.refresh_preset_list();
                 Task::none()
             }
             Message::ClosePresetBrowser => {
                 self.preset_browser_open = false;
+                self.end_overlay_resize();
                 Task::none()
             }
             Message::PresetNameChanged(name) => {
@@ -1406,6 +1521,7 @@ impl App {
             }
             Message::OpenSettings => {
                 self.preset_browser_open = false;
+                self.end_overlay_resize();
                 self.settings_open = true;
                 self.capturing_action = None;
                 self.sync_settings_drafts();
@@ -1414,6 +1530,7 @@ impl App {
             Message::CloseSettings => {
                 self.settings_open = false;
                 self.capturing_action = None;
+                self.end_overlay_resize();
                 Task::none()
             }
             Message::SettingsTab(tab) => {
@@ -1833,6 +1950,15 @@ impl App {
         }
         if self.button_controls.is_some() {
             layers.push(self.button_controls_overlay());
+        }
+        if self.overlay_resize.is_some() {
+            layers.push(
+                mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                    .on_move(Message::OverlayResizeMove)
+                    .on_release(Message::OverlayResizeEnd)
+                    .interaction(mouse::Interaction::ResizingDiagonallyDown)
+                    .into(),
+            );
         }
         if layers.len() == 1 {
             layers.pop().unwrap()
@@ -2468,15 +2594,15 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
-                scrollable(list)
-                    .style(chrome::scrollable_style)
-                    .height(Length::Fixed(280.0))
-                    .width(Length::Fill),
+                overlay_scrollable(list),
+                overlay_resize_grip(OverlayKind::Presets),
             ]
-            .spacing(10),
+            .spacing(10)
+            .height(Length::Fill),
         )
         .padding(16)
-        .width(520)
+        .width(self.preset_overlay_size.width)
+        .height(self.preset_overlay_size.height)
         .style(chrome::overlay_panel);
 
         opaque(
@@ -2524,15 +2650,15 @@ impl App {
                 row![defaults_tab, keys_tab]
                     .spacing(6)
                     .align_y(Alignment::Center),
-                scrollable(body)
-                    .style(chrome::scrollable_style)
-                    .height(Length::Fixed(360.0))
-                    .width(Length::Fill),
+                overlay_scrollable(body),
+                overlay_resize_grip(OverlayKind::Settings),
             ]
-            .spacing(10),
+            .spacing(10)
+            .height(Length::Fill),
         )
         .padding(16)
-        .width(560)
+        .width(self.settings_overlay_size.width)
+        .height(self.settings_overlay_size.height)
         .style(chrome::overlay_panel);
 
         opaque(
@@ -2887,6 +3013,25 @@ fn bindable<'a>(
     mouse_area(button)
         .on_right_press(Message::OpenButtonControls(target))
         .into()
+}
+
+fn overlay_scrollable<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    scrollable(content)
+        .style(chrome::scrollable_style)
+        .spacing(4.0)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+fn overlay_resize_grip(kind: OverlayKind) -> Element<'static, Message> {
+    row![
+        Space::new().width(Length::Fill),
+        mouse_area(chrome::resize_grip())
+            .on_press(Message::OverlayResizeStart(kind))
+            .interaction(mouse::Interaction::ResizingDiagonallyDown),
+    ]
+    .into()
 }
 
 fn collapsible<'a>(

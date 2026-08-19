@@ -143,6 +143,10 @@ pub fn drag_handle<'a>() -> text::Text<'a> {
     text("::").size(FONT_BODY).color(TEXT_DIM)
 }
 
+pub fn resize_grip<'a>() -> text::Text<'a> {
+    text("⌟").size(FONT_BODY).color(TEXT_DIM)
+}
+
 pub fn swatch_border(_theme: &Theme) -> Border {
     Border {
         color: RULE,
