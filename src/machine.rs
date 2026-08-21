@@ -29,6 +29,7 @@ pub const MAX_SYMBOLS: usize = 8;
 /// Per-machine speed slider: `0` is default (1×), `+10` is 10×, `-10` is 1/10×.
 pub const MIN_MACHINE_SPEED: f32 = -10.0;
 pub const MAX_MACHINE_SPEED: f32 = 10.0;
+pub const MACHINE_SPEED_STEP: f32 = 0.01;
 
 /// Shared mutate slider: fraction of transition-table rules to re-randomize.
 pub const MIN_MUTATE_PERCENT: u8 = 1;
@@ -51,6 +52,8 @@ pub fn default_machine_name(index: usize) -> String {
 /// Transition: (next_state, write_symbol, action)
 #[derive(Debug, Clone)]
 pub struct Machine {
+    /// Number of TM states; table length is `num_states * num_symbols * 3`.
+    pub num_states: usize,
     /// Flat table: for each (symbol, state), three i32s [next_state, write_symbol, action]
     pub table: Vec<i32>,
     pub state: i32,
@@ -94,6 +97,7 @@ impl Machine {
         let start_y = rng.random_range(0..height as i32);
 
         Self {
+            num_states,
             table,
             state: 0,
             x_pos: start_x,
@@ -130,22 +134,22 @@ impl Machine {
         }
     }
 
-    /// Accrue this round's floating-point rate and take any whole steps due.
+    /// Accrue `rate` steps for this round and take any whole steps due.
     pub fn take_scheduled_steps(
         &mut self,
         map: &mut [i32],
         canvas: &mut [u8],
-        num_states: usize,
         width: i32,
         height: i32,
+        rate: f64,
     ) -> Option<DirtyRect> {
         self.rounds_at_speed += 1;
-        let due = (step_rate(self.speed) * self.rounds_at_speed as f64).floor() as u64;
+        let due = (rate * self.rounds_at_speed as f64).floor() as u64;
         let steps = due.saturating_sub(self.steps_at_speed);
         self.steps_at_speed = due;
         let mut dirty: Option<DirtyRect> = None;
         for _ in 0..steps {
-            let wrote = self.step(map, canvas, num_states, width, height);
+            let wrote = self.step(map, canvas, width, height);
             dirty = Some(match dirty {
                 Some(rect) => rect.union(wrote),
                 None => wrote,
@@ -154,17 +158,23 @@ impl Machine {
         dirty
     }
 
-    pub fn reset(&mut self) {
-        self.state = 0;
-        self.x_pos = self.start_x;
-        self.y_pos = self.start_y;
+    /// Clear fractional scheduling state without moving the head.
+    pub fn reset_schedule_accumulators(&mut self) {
         self.rounds_at_speed = 0;
         self.steps_at_speed = 0;
     }
 
+    pub fn reset(&mut self) {
+        self.state = 0;
+        self.x_pos = self.start_x;
+        self.y_pos = self.start_y;
+        self.reset_schedule_accumulators();
+    }
+
     /// Re-randomize `percent` of `(state, symbol)` rules. Leaves start position,
     /// head, state, speed, name, and active unchanged.
-    pub fn mutate_table(&mut self, num_states: usize, num_symbols: usize, percent: u8) {
+    pub fn mutate_table(&mut self, num_symbols: usize, percent: u8) {
+        let num_states = self.num_states;
         let n_rules = num_states * num_symbols;
         debug_assert_eq!(self.table.len(), n_rules * 3);
         let count = mutation_count(n_rules, percent);
@@ -191,13 +201,65 @@ impl Machine {
         }
     }
 
+    /// Resize the transition table to `num_states`, keeping rules that still fit
+    /// (clamping `next_state`) and randomizing any new `(state, symbol)` cells.
+    pub fn resize_states(&mut self, num_states: usize, num_symbols: usize) {
+        assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
+        assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
+        if num_states == self.num_states {
+            debug_assert_eq!(self.table.len(), num_states * num_symbols * 3);
+            return;
+        }
+
+        let old_states = self.num_states;
+        let mut new_table = vec![0i32; num_states * num_symbols * 3];
+        let mut rng = rand::rng();
+        let copy_states = old_states.min(num_states);
+        for sy in 0..num_symbols {
+            for st in 0..copy_states {
+                let old_idx = trans_index(old_states, st, sy);
+                let mut next_st = self.table[old_idx];
+                let write_sy = self.table[old_idx + 1];
+                let action = self.table[old_idx + 2];
+                if next_st < 0 || next_st as usize >= num_states {
+                    next_st = rng.random_range(0..num_states) as i32;
+                }
+                set_trans_raw(
+                    &mut new_table,
+                    num_states,
+                    st,
+                    sy,
+                    next_st,
+                    write_sy,
+                    action,
+                );
+            }
+            for st in copy_states..num_states {
+                let (next_st, write_sy, action) = random_trans(&mut rng, num_states, num_symbols);
+                set_trans_raw(
+                    &mut new_table,
+                    num_states,
+                    st,
+                    sy,
+                    next_st,
+                    write_sy,
+                    action,
+                );
+            }
+        }
+        self.num_states = num_states;
+        self.table = new_table;
+        if self.state < 0 || self.state as usize >= num_states {
+            self.state = 0;
+        }
+    }
+
     /// One read / write / move on the shared tape. The written symbol is stored
     /// on the tape; the canvas stores this machine's current RGB for that symbol.
     pub fn step(
         &mut self,
         map: &mut [i32],
         canvas: &mut [u8],
-        num_states: usize,
         width: i32,
         height: i32,
     ) -> DirtyRect {
@@ -207,7 +269,7 @@ impl Machine {
         let sy = map[idx_map] as usize;
         let st = self.state as usize;
 
-        let t = trans_index(num_states, st, sy);
+        let t = trans_index(self.num_states, st, sy);
         let next_st = self.table[t];
         let write_sy = self.table[t + 1];
         let ac = self.table[t + 2];
@@ -248,9 +310,9 @@ impl Machine {
     }
 
     /// Share string: `numStates,numSymbols,startX,startY,` then flat table values.
-    pub fn to_string(&self, num_states: usize, num_symbols: usize) -> String {
+    pub fn to_string(&self, num_symbols: usize) -> String {
         let mut parts = Vec::with_capacity(4 + self.table.len());
-        parts.push(num_states.to_string());
+        parts.push(self.num_states.to_string());
         parts.push(num_symbols.to_string());
         parts.push(self.start_x.to_string());
         parts.push(self.start_y.to_string());
@@ -311,6 +373,7 @@ impl Machine {
         };
 
         let machine = Self {
+            num_states,
             table,
             state: 0,
             x_pos: start_x,

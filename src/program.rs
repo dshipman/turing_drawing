@@ -1,5 +1,7 @@
 //! Shared tape plus one or more machines that step on it in order.
 
+use serde::{Deserialize, Serialize};
+
 use crate::dirty::DirtyRect;
 use crate::machine::{validate_map_size, wrap_pos, Machine};
 use crate::palette::{empty_canvas, fill_rgba_from_map, Palette};
@@ -7,9 +9,34 @@ use crate::tape::{self, TapeInit};
 
 pub use crate::machine::{
     default_machine_name, mutation_count, step_rate, DEFAULT_MAP_HEIGHT, DEFAULT_MAP_WIDTH,
-    DEFAULT_MUTATE_PERCENT, MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_MUTATE_PERCENT, MAX_STATES,
-    MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES, MIN_SYMBOLS,
+    DEFAULT_MUTATE_PERCENT, MACHINE_SPEED_STEP, MAX_MACHINE_SPEED, MAX_MAP_SIZE,
+    MAX_MUTATE_PERCENT, MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE,
+    MIN_MUTATE_PERCENT, MIN_STATES, MIN_SYMBOLS,
 };
+
+/// How per-machine speed sliders map to steps within each simulation round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScheduleMode {
+    /// Each machine steps at `step_rate(speed)` independently (default).
+    #[default]
+    Absolute,
+    /// Active machines share a fixed budget of 1.0 steps/round, split by weight.
+    Normalised,
+}
+
+impl ScheduleMode {
+    pub const ALL: [ScheduleMode; 2] = [Self::Absolute, Self::Normalised];
+}
+
+impl std::fmt::Display for ScheduleMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Absolute => "Absolute",
+            Self::Normalised => "Normalised",
+        })
+    }
+}
 
 /// Where `index` lands after `remove(from)` then `insert(to)`.
 pub fn remap_index_after_reorder(index: usize, from: usize, to: usize) -> usize {
@@ -27,7 +54,6 @@ pub fn remap_index_after_reorder(index: usize, from: usize, to: usize) -> usize 
 /// The program: shared grid, shared alphabet size, and the machines that draw on it.
 #[derive(Debug, Clone)]
 pub struct Program {
-    pub num_states: usize,
     pub num_symbols: usize,
     pub width: usize,
     pub height: usize,
@@ -42,6 +68,8 @@ pub struct Program {
     pub itr_count: u64,
     /// How [`Self::reset`] fills the tape. Empty (all zeros) is the default.
     pub tape_init: TapeInit,
+    /// Absolute vs normalised step-rate scheduling (session preference).
+    pub schedule_mode: ScheduleMode,
 }
 
 impl Program {
@@ -70,7 +98,6 @@ impl Program {
         machine.palette = canvas_palette.clone();
         let cells = width * height;
         let mut prog = Self {
-            num_states,
             num_symbols,
             width,
             height,
@@ -82,6 +109,7 @@ impl Program {
             machines: vec![machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -96,7 +124,6 @@ impl Program {
         parsed.machine.palette = canvas_palette.clone();
         let cells = DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT;
         let mut prog = Self {
-            num_states: parsed.num_states,
             num_symbols: parsed.num_symbols,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
@@ -108,6 +135,7 @@ impl Program {
             machines: vec![parsed.machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -174,22 +202,25 @@ impl Program {
         Ok(())
     }
 
-    /// Replace every machine with a new random table and start, using `num_states` /
-    /// `num_symbols`. Keeps the current machine count, names, and speed sliders.
-    pub fn randomize(&mut self, num_states: usize, num_symbols: usize) {
-        assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
+    /// Replace every machine with a new random table and start, using each
+    /// machine's own state count and the shared `num_symbols`. Keeps the current
+    /// machine count, names, ids, palettes, and speed sliders.
+    pub fn randomize(&mut self, num_symbols: usize) {
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
 
-        self.num_states = num_states;
         self.num_symbols = num_symbols;
         let speeds: Vec<f32> = self.machines.iter().map(|m| m.speed).collect();
         let names: Vec<String> = self.machines.iter().map(|m| m.name.clone()).collect();
         let ids: Vec<u64> = self.machines.iter().map(|m| m.id).collect();
         let palettes: Vec<Palette> = self.machines.iter().map(|m| m.palette.clone()).collect();
+        let state_counts: Vec<usize> = self.machines.iter().map(|m| m.num_states).collect();
         let n = self.machines.len().max(1);
         let (width, height) = (self.width, self.height);
         self.machines = (0..n)
-            .map(|_| Machine::new_random(num_states, num_symbols, width, height))
+            .map(|i| {
+                let num_states = state_counts.get(i).copied().unwrap_or(MIN_STATES);
+                Machine::new_random(num_states, num_symbols, width, height)
+            })
             .collect();
         for (i, machine) in self.machines.iter_mut().enumerate() {
             if let Some(speed) = speeds.get(i) {
@@ -218,7 +249,7 @@ impl Program {
     }
 
     /// Replace one machine with a new random table and start, then reset.
-    /// Uses the program's current state/symbol counts so other machines stay valid.
+    /// Uses that machine's state count and the program's symbol count.
     /// Keeps the slot's speed slider, active flag, and name.
     pub fn randomize_machine(&mut self, index: usize) -> Result<(), String> {
         if index >= self.machines.len() {
@@ -229,8 +260,9 @@ impl Program {
         let name = self.machines[index].name.clone();
         let id = self.machines[index].id;
         let palette = self.machines[index].palette.clone();
+        let num_states = self.machines[index].num_states;
         self.machines[index] =
-            Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
+            Machine::new_random(num_states, self.num_symbols, self.width, self.height);
         self.machines[index].speed = speed;
         self.machines[index].active = active;
         self.machines[index].name = name;
@@ -242,18 +274,19 @@ impl Program {
 
     /// Re-randomize `percent` of one machine's transition rules. Does not reset.
     pub fn mutate_machine(&mut self, index: usize, percent: u8) -> Result<(), String> {
+        let num_symbols = self.num_symbols;
         let Some(machine) = self.machines.get_mut(index) else {
             return Err("invalid machine index".into());
         };
-        machine.mutate_table(self.num_states, self.num_symbols, percent);
+        machine.mutate_table(num_symbols, percent);
         Ok(())
     }
 
     /// Re-randomize `percent` of every machine's transition rules. Does not reset.
     pub fn mutate_all(&mut self, percent: u8) {
-        let (num_states, num_symbols) = (self.num_states, self.num_symbols);
+        let num_symbols = self.num_symbols;
         for machine in &mut self.machines {
-            machine.mutate_table(num_states, num_symbols, percent);
+            machine.mutate_table(num_symbols, percent);
         }
     }
 
@@ -274,6 +307,9 @@ impl Program {
             return Err("invalid machine index".into());
         };
         machine.set_speed(speed);
+        if self.schedule_mode == ScheduleMode::Normalised {
+            self.reset_schedule_accumulators();
+        }
         Ok(())
     }
 
@@ -282,8 +318,60 @@ impl Program {
         let Some(machine) = self.machines.get_mut(index) else {
             return Err("invalid machine index".into());
         };
+        if machine.active == active {
+            return Ok(());
+        }
         machine.active = active;
+        if self.schedule_mode == ScheduleMode::Normalised {
+            self.reset_schedule_accumulators();
+        }
         Ok(())
+    }
+
+    /// Absolute vs normalised step-rate scheduling.
+    pub fn set_schedule_mode(&mut self, mode: ScheduleMode) {
+        if self.schedule_mode != mode {
+            self.schedule_mode = mode;
+            self.reset_schedule_accumulators();
+        }
+    }
+
+    /// Clear fractional step accruals on every machine (does not reset the drawing).
+    pub fn reset_schedule_accumulators(&mut self) {
+        for machine in &mut self.machines {
+            machine.reset_schedule_accumulators();
+        }
+    }
+
+    /// Sum of `step_rate` weights for active machines.
+    pub fn active_weight_sum(&self) -> f64 {
+        self.machines
+            .iter()
+            .filter(|m| m.active)
+            .map(|m| step_rate(m.speed))
+            .sum()
+    }
+
+    /// Per-round step rate for machine `index` under the current schedule mode.
+    pub fn scheduled_rate(&self, index: usize) -> f64 {
+        let Some(machine) = self.machines.get(index) else {
+            return 0.0;
+        };
+        if !machine.active {
+            return 0.0;
+        }
+        let weight = step_rate(machine.speed);
+        match self.schedule_mode {
+            ScheduleMode::Absolute => weight,
+            ScheduleMode::Normalised => {
+                let sum = self.active_weight_sum();
+                if sum <= 0.0 {
+                    0.0
+                } else {
+                    weight / sum
+                }
+            }
+        }
     }
 
     /// Set one machine's display name (may be empty; UI falls back to a default).
@@ -295,10 +383,28 @@ impl Program {
         Ok(())
     }
 
-    /// Append a random machine with the current counts, then reset the program.
-    pub fn add_machine(&mut self) {
+    /// Resize one machine's state count, rebuild its table, and reset.
+    pub fn set_machine_num_states(&mut self, index: usize, num_states: usize) -> Result<(), String> {
+        if !(MIN_STATES..=MAX_STATES).contains(&num_states) {
+            return Err(format!(
+                "num states must be {MIN_STATES}..={MAX_STATES}, got {num_states}"
+            ));
+        }
+        let num_symbols = self.num_symbols;
+        let Some(machine) = self.machines.get_mut(index) else {
+            return Err("invalid machine index".into());
+        };
+        machine.resize_states(num_states, num_symbols);
+        self.reset();
+        Ok(())
+    }
+
+    /// Append a random machine with `num_states` and the program's symbol count,
+    /// then reset the program.
+    pub fn add_machine(&mut self, num_states: usize) {
+        assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
         let mut machine =
-            Machine::new_random(self.num_states, self.num_symbols, self.width, self.height);
+            Machine::new_random(num_states, self.num_symbols, self.width, self.height);
         machine.name = default_machine_name(self.machines.len());
         machine.palette = self.canvas_palette.clone();
         self.machines.push(machine);
@@ -332,8 +438,9 @@ impl Program {
         Ok(())
     }
 
-    /// Load an encoding into `index`. If this is the only machine, shared counts
-    /// may change. With multiple machines, counts must match.
+    /// Load an encoding into `index`. If this is the only machine, the shared
+    /// symbol count may change. With multiple machines, symbols must match;
+    /// state counts may differ per machine.
     pub fn load_machine(&mut self, index: usize, s: &str) -> Result<(), String> {
         if index >= self.machines.len() {
             return Err("invalid machine index".into());
@@ -345,7 +452,6 @@ impl Program {
         let id = self.machines[index].id;
         let palette = self.machines[index].palette.clone();
         if self.machines.len() == 1 {
-            self.num_states = parsed.num_states;
             self.num_symbols = parsed.num_symbols;
             self.machines[0] = parsed.machine;
             self.machines[0].speed = speed;
@@ -357,10 +463,10 @@ impl Program {
             return Ok(());
         }
 
-        if parsed.num_states != self.num_states || parsed.num_symbols != self.num_symbols {
+        if parsed.num_symbols != self.num_symbols {
             return Err(format!(
-                "machine must have {} states and {} symbols",
-                self.num_states, self.num_symbols
+                "machine must have {} symbols",
+                self.num_symbols
             ));
         }
 
@@ -374,33 +480,42 @@ impl Program {
     }
 
     pub fn machine_encoding(&self, index: usize) -> String {
-        self.machines[index].to_string(self.num_states, self.num_symbols)
+        self.machines[index].to_string(self.num_symbols)
     }
 
-    /// Run `num_itrs` interleaved rounds. Each machine accrues its floating-point
-    /// step rate and takes any whole steps that are due (default: one per round).
+    /// Run `num_itrs` interleaved rounds. Each active machine accrues its
+    /// scheduled step rate and takes any whole steps that are due.
     pub fn update(&mut self, num_itrs: usize) -> Option<DirtyRect> {
         let width = self.width as i32;
         let height = self.height as i32;
-        let num_states = self.num_states;
         let mut dirty: Option<DirtyRect> = None;
+        let weight_sum = match self.schedule_mode {
+            ScheduleMode::Absolute => 0.0,
+            ScheduleMode::Normalised => self.active_weight_sum(),
+        };
 
         for _ in 0..num_itrs {
             for machine in self.machines.iter_mut() {
-                if machine.active {
-                    let wrote = machine.take_scheduled_steps(
-                        &mut self.map,
-                        &mut self.canvas,
-                        num_states,
-                        width,
-                        height,
-                    );
-                    if let Some(rect) = wrote {
-                        dirty = Some(match dirty {
-                            Some(acc) => acc.union(rect),
-                            None => rect,
-                        });
+                if !machine.active {
+                    continue;
+                }
+                let rate = match self.schedule_mode {
+                    ScheduleMode::Absolute => step_rate(machine.speed),
+                    ScheduleMode::Normalised => {
+                        if weight_sum <= 0.0 {
+                            0.0
+                        } else {
+                            step_rate(machine.speed) / weight_sum
+                        }
                     }
+                };
+                let wrote =
+                    machine.take_scheduled_steps(&mut self.map, &mut self.canvas, width, height, rate);
+                if let Some(rect) = wrote {
+                    dirty = Some(match dirty {
+                        Some(acc) => acc.union(rect),
+                        None => rect,
+                    });
                 }
             }
             self.itr_count += 1;
@@ -450,8 +565,9 @@ mod tests {
     use crate::palette::{empty_canvas, rgb_at, Palette, PaletteKind};
     use crate::tape::{TapeInit, TapeInitKind};
 
-    fn fixed_machine(table: Vec<i32>, start_x: i32, start_y: i32) -> Machine {
+    fn fixed_machine(num_states: usize, table: Vec<i32>, start_x: i32, start_y: i32) -> Machine {
         Machine {
+            num_states,
             table,
             state: 0,
             x_pos: start_x,
@@ -476,7 +592,6 @@ mod tests {
         start_y: i32,
     ) -> Program {
         Program {
-            num_states,
             num_symbols,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
@@ -485,9 +600,10 @@ mod tests {
             canvas_palette: Palette::classic(),
             canvas_revision: 0,
             canvas_dirty: None,
-            machines: vec![fixed_machine(table, start_x, start_y)],
+            machines: vec![fixed_machine(num_states, table, start_x, start_y)],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         }
     }
 
@@ -496,7 +612,7 @@ mod tests {
         let p = Program::new_random(4, 3);
         let s = p.machine_encoding(0);
         let q = Program::from_string(&s).unwrap();
-        assert_eq!(p.num_states, q.num_states);
+        assert_eq!(p.machines[0].num_states, q.machines[0].num_states);
         assert_eq!(p.num_symbols, q.num_symbols);
         assert_eq!(p.machines[0].table, q.machines[0].table);
         assert_eq!(p.machines[0].start_x, q.machines[0].start_x);
@@ -518,7 +634,7 @@ mod tests {
         // 1 state × 2 symbols × 3 = 6 table entries, no start fields.
         let enc = "1,2,0,1,0,0,1,0";
         let p = Program::from_string(enc).unwrap();
-        assert_eq!(p.num_states, 1);
+        assert_eq!(p.machines[0].num_states, 1);
         assert_eq!(p.num_symbols, 2);
         assert_eq!(p.machines[0].start_x, 0);
         assert_eq!(p.machines[0].start_y, 0);
@@ -556,8 +672,8 @@ mod tests {
         let p = Program::new_random(4, 3);
         let m = &p.machines[0];
         for sy0 in 0..p.num_symbols {
-            for st0 in 0..p.num_states {
-                let idx = (p.num_states * sy0 + st0) * 3;
+            for st0 in 0..m.num_states {
+                let idx = (m.num_states * sy0 + st0) * 3;
                 let write = m.table[idx + 1];
                 assert!(write >= 1 && write < p.num_symbols as i32);
             }
@@ -590,7 +706,7 @@ mod tests {
         let enc = format!("#{}", parts.join(","));
 
         let mut p = Program::from_string(&enc).unwrap();
-        assert_eq!(p.num_states, 4);
+        assert_eq!(p.machines[0].num_states, 4);
         assert_eq!(p.num_symbols, 3);
         assert_eq!(p.machines[0].table.len(), 36);
         assert_eq!(p.machines[0].start_x, 0);
@@ -626,7 +742,7 @@ mod tests {
         assert_eq!(p.itr_count, 50);
         assert!(p.map.iter().any(|&s| s != 0));
 
-        p.add_machine();
+        p.add_machine(1);
         assert_eq!(p.machines.len(), 2);
         assert_eq!(p.itr_count, 0);
         assert!(p.map.iter().all(|&s| s == 0));
@@ -634,6 +750,7 @@ mod tests {
         assert_eq!(p.machines[0].y_pos, p.machines[0].start_y);
         assert_eq!(p.machines[1].x_pos, p.machines[1].start_x);
         assert_eq!(p.machines[1].y_pos, p.machines[1].start_y);
+        assert_eq!(p.machines[1].num_states, 1);
     }
 
     #[test]
@@ -641,10 +758,10 @@ mod tests {
         let mut p = Program::new_random(2, 2);
         let id0 = p.machines[0].id;
         assert_ne!(id0, 0);
-        p.add_machine();
+        p.add_machine(2);
         let id1 = p.machines[1].id;
         assert_ne!(id0, id1);
-        p.randomize(2, 2);
+        p.randomize(2);
         assert_eq!(p.machines[0].id, id0);
         assert_eq!(p.machines[1].id, id1);
         p.remove_machine(1).unwrap();
@@ -657,17 +774,18 @@ mod tests {
         // Both start at (0,0). Machine 0 writes 1 and moves. Machine 1 writes 2
         // only when it reads symbol 1 — so map[0] == 2 means it saw the write.
         let m0 = fixed_machine(
+            1,
             vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT],
             0,
             0,
         );
         let m1 = fixed_machine(
+            1,
             vec![0, 1, ACTION_LEFT, 0, 2, ACTION_RIGHT, 0, 2, ACTION_RIGHT],
             0,
             0,
         );
         let mut p = Program {
-            num_states: 1,
             num_symbols: 3,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
@@ -679,6 +797,7 @@ mod tests {
             machines: vec![m0, m1],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
 
         p.update(1);
@@ -689,27 +808,41 @@ mod tests {
     }
 
     #[test]
-    fn load_rejects_mismatched_counts_when_multiple_machines() {
+    fn load_rejects_mismatched_symbols_when_multiple_machines() {
         let mut p = Program::new_random(4, 3);
-        p.add_machine();
+        p.add_machine(4);
         assert_eq!(p.machines.len(), 2);
 
         let other = Machine::new_random(2, 2, p.width, p.height);
-        let enc = other.to_string(2, 2);
+        let enc = other.to_string(2);
         let err = p.load_machine(0, &enc).unwrap_err();
-        assert!(err.contains("4 states") && err.contains("3 symbols"));
+        assert!(err.contains("3 symbols"));
+        assert!(!err.contains("states"));
         assert_eq!(p.machines.len(), 2);
-        assert_eq!(p.num_states, 4);
+        assert_eq!(p.machines[0].num_states, 4);
         assert_eq!(p.num_symbols, 3);
+    }
+
+    #[test]
+    fn load_allows_mismatched_states_when_multiple_machines() {
+        let mut p = Program::new_random(4, 3);
+        p.add_machine(4);
+        let other = Machine::new_random(2, 3, p.width, p.height);
+        let enc = other.to_string(3);
+        p.load_machine(0, &enc).unwrap();
+        assert_eq!(p.machines[0].num_states, 2);
+        assert_eq!(p.machines[1].num_states, 4);
+        assert_eq!(p.num_symbols, 3);
+        assert_eq!(p.machines[0].table, other.table);
     }
 
     #[test]
     fn load_single_machine_may_change_counts() {
         let mut p = Program::new_random(4, 3);
         let other = Machine::new_random(2, 2, p.width, p.height);
-        let enc = other.to_string(2, 2);
+        let enc = other.to_string(2);
         p.load_machine(0, &enc).unwrap();
-        assert_eq!(p.num_states, 2);
+        assert_eq!(p.machines[0].num_states, 2);
         assert_eq!(p.num_symbols, 2);
         assert_eq!(p.machines[0].table, other.table);
         assert_eq!(p.itr_count, 0);
@@ -725,7 +858,7 @@ mod tests {
     #[test]
     fn randomize_machine_replaces_only_that_machine() {
         let mut p = Program::new_random(4, 3);
-        p.add_machine();
+        p.add_machine(4);
         let other = p.machines[1].clone();
         p.update(10);
         assert!(p.itr_count > 0);
@@ -747,23 +880,22 @@ mod tests {
         // Always move +x, independent of the symbol read.
         let table = vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT];
         let fast = {
-            let mut m = fixed_machine(table.clone(), 0, 0);
+            let mut m = fixed_machine(1, table.clone(), 0, 0);
             m.speed = 10.0;
             m
         };
         let slow = {
-            let mut m = fixed_machine(table.clone(), 0, 1);
+            let mut m = fixed_machine(1, table.clone(), 0, 1);
             m.speed = -10.0;
             m
         };
         let mid = {
-            let mut m = fixed_machine(table.clone(), 0, 3);
+            let mut m = fixed_machine(1, table.clone(), 0, 3);
             m.speed = 5.0;
             m
         };
-        let normal = fixed_machine(table, 0, 2);
+        let normal = fixed_machine(1, table, 0, 2);
         let mut p = Program {
-            num_states: 1,
             num_symbols: 2,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
@@ -775,6 +907,7 @@ mod tests {
             machines: vec![fast, slow, normal, mid],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
 
         p.update(10);
@@ -784,15 +917,86 @@ mod tests {
         assert_eq!(p.machines[3].x_pos, (step_rate(5.0) * 10.0).floor() as i32);
     }
 
+    fn walkers(speeds: &[(f32, bool)]) -> Program {
+        let table = vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT];
+        let machines = speeds
+            .iter()
+            .enumerate()
+            .map(|(i, &(speed, active))| {
+                let mut m = fixed_machine(1, table.clone(), 0, i as i32);
+                m.speed = speed;
+                m.active = active;
+                m
+            })
+            .collect();
+        Program {
+            num_symbols: 2,
+            width: DEFAULT_MAP_WIDTH,
+            height: DEFAULT_MAP_HEIGHT,
+            map: vec![0; DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT],
+            canvas: empty_canvas(DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT),
+            canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
+            machines,
+            itr_count: 0,
+            tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Normalised,
+        }
+    }
+
+    #[test]
+    fn normalised_equal_speeds_split_budget() {
+        let mut p = walkers(&[(0.0, true), (0.0, true)]);
+        p.update(100);
+        assert_eq!(p.machines[0].x_pos, 50);
+        assert_eq!(p.machines[1].x_pos, 50);
+        assert_eq!(p.machines[0].x_pos + p.machines[1].x_pos, 100);
+    }
+
+    #[test]
+    fn normalised_speeds_are_relative_shares() {
+        let mut p = walkers(&[(10.0, true), (0.0, true)]);
+        p.update(100);
+        // Weights 10 : 1 → ~91 and ~9 steps; total still ~100.
+        assert_eq!(p.machines[0].x_pos, 90);
+        assert_eq!(p.machines[1].x_pos, 9);
+        assert_eq!(p.machines[0].x_pos + p.machines[1].x_pos, 99);
+        assert!((p.scheduled_rate(0) - 10.0 / 11.0).abs() < 1e-12);
+        assert!((p.scheduled_rate(1) - 1.0 / 11.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn normalised_inactive_excluded_from_denominator() {
+        let mut p = walkers(&[(0.0, true), (10.0, false), (0.0, true)]);
+        assert!((p.active_weight_sum() - 2.0).abs() < 1e-12);
+        assert!((p.scheduled_rate(0) - 0.5).abs() < 1e-12);
+        assert_eq!(p.scheduled_rate(1), 0.0);
+        assert!((p.scheduled_rate(2) - 0.5).abs() < 1e-12);
+
+        p.update(100);
+        assert_eq!(p.machines[0].x_pos, 50);
+        assert_eq!(p.machines[1].x_pos, 0);
+        assert_eq!(p.machines[2].x_pos, 50);
+    }
+
+    #[test]
+    fn absolute_totals_scale_with_sum_of_rates() {
+        let mut p = walkers(&[(0.0, true), (0.0, true)]);
+        p.set_schedule_mode(ScheduleMode::Absolute);
+        p.update(10);
+        // Two machines at 1× → 20 total steps.
+        assert_eq!(p.machines[0].x_pos + p.machines[1].x_pos, 20);
+    }
+
     #[test]
     fn inactive_machine_does_not_step() {
         let table = vec![0, 1, ACTION_RIGHT as i32];
-        let active = fixed_machine(table.clone(), 0, 0);
-        let mut inactive = fixed_machine(table, 0, 0);
+        let active = fixed_machine(1, table.clone(), 0, 0);
+        let mut inactive = fixed_machine(1, table, 0, 0);
         inactive.active = false;
 
         let mut p = Program {
-            num_states: 1,
             num_symbols: 2,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
@@ -804,6 +1008,7 @@ mod tests {
             machines: vec![active, inactive],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
 
         p.update(5);
@@ -840,7 +1045,6 @@ mod tests {
     #[test]
     fn wrap_on_nonsquare_canvas() {
         let mut p = Program {
-            num_states: 1,
             num_symbols: 2,
             width: 10,
             height: 8,
@@ -849,9 +1053,10 @@ mod tests {
             canvas_palette: Palette::classic(),
             canvas_revision: 0,
             canvas_dirty: None,
-            machines: vec![fixed_machine(vec![0, 1, ACTION_LEFT], 9, 0)],
+            machines: vec![fixed_machine(1, vec![0, 1, ACTION_LEFT], 9, 0)],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
         p.update(1);
         assert_eq!(p.machines[0].x_pos, 0);
@@ -892,7 +1097,7 @@ mod tests {
     fn new_and_added_machines_get_default_names() {
         let mut p = Program::new_random(2, 2);
         assert_eq!(p.machines[0].name, "Machine 1");
-        p.add_machine();
+        p.add_machine(2);
         assert_eq!(p.machines[1].name, "Machine 2");
         let q = Program::from_string(&p.machine_encoding(0)).unwrap();
         assert_eq!(q.machines[0].name, "Machine 1");
@@ -901,7 +1106,7 @@ mod tests {
     #[test]
     fn randomize_and_load_keep_machine_name() {
         let mut p = Program::new_random(2, 2);
-        p.add_machine();
+        p.add_machine(5);
         p.set_machine_name(0, "Walker".into()).unwrap();
         p.set_machine_name(1, "Hopper".into()).unwrap();
         let other = p.machines[1].clone();
@@ -910,16 +1115,48 @@ mod tests {
         assert_eq!(p.machines[0].name, "Walker");
         assert_eq!(p.machines[1].name, "Hopper");
         assert_eq!(p.machines[1].table, other.table);
+        assert_eq!(p.machines[0].num_states, 2);
+        assert_eq!(p.machines[1].num_states, 5);
 
-        p.randomize(3, 3);
+        p.randomize(3);
         assert_eq!(p.machines[0].name, "Walker");
         assert_eq!(p.machines[1].name, "Hopper");
-        assert_eq!(p.num_states, 3);
+        assert_eq!(p.machines[0].num_states, 2);
+        assert_eq!(p.machines[1].num_states, 5);
+        assert_eq!(p.num_symbols, 3);
 
-        let enc = Machine::new_random(3, 3, p.width, p.height).to_string(3, 3);
+        let enc = Machine::new_random(3, 3, p.width, p.height).to_string(3);
         p.load_machine(1, &enc).unwrap();
         assert_eq!(p.machines[1].name, "Hopper");
+        assert_eq!(p.machines[1].num_states, 3);
         assert!(p.set_machine_name(9, "x".into()).is_err());
+    }
+
+    #[test]
+    fn set_machine_num_states_resizes_and_resets() {
+        let mut p = Program::new_random(2, 3);
+        p.update(10);
+        assert!(p.itr_count > 0);
+        p.set_machine_num_states(0, 5).unwrap();
+        assert_eq!(p.machines[0].num_states, 5);
+        assert_eq!(p.machines[0].table.len(), 5 * 3 * 3);
+        assert_eq!(p.itr_count, 0);
+        assert!(p.map.iter().all(|&s| s == 0));
+        p.set_machine_num_states(0, 1).unwrap();
+        assert_eq!(p.machines[0].num_states, 1);
+        assert_eq!(p.machines[0].table.len(), 1 * 3 * 3);
+        assert!(p.set_machine_num_states(0, 0).is_err());
+        assert!(p.set_machine_num_states(9, 2).is_err());
+    }
+
+    #[test]
+    fn add_machine_uses_requested_state_count() {
+        let mut p = Program::new_random(4, 3);
+        p.add_machine(2);
+        assert_eq!(p.machines[0].num_states, 4);
+        assert_eq!(p.machines[1].num_states, 2);
+        assert_eq!(p.num_symbols, 3);
+        assert_eq!(p.machines[1].table.len(), 2 * 3 * 3);
     }
 
     #[test]
@@ -950,8 +1187,8 @@ mod tests {
     #[test]
     fn reorder_machines_moves_without_reset() {
         let mut p = Program::new_random(2, 2);
-        p.add_machine();
-        p.add_machine();
+        p.add_machine(2);
+        p.add_machine(2);
         p.machines[0].name = "A".into();
         p.machines[1].name = "B".into();
         p.machines[2].name = "C".into();
@@ -981,7 +1218,7 @@ mod tests {
     #[test]
     fn mutate_machine_rewrites_table_without_reset() {
         let mut p = Program::new_random(4, 3);
-        p.add_machine();
+        p.add_machine(4);
         p.update(50);
         let start = (p.machines[0].start_x, p.machines[0].start_y);
         let pos = (p.machines[0].x_pos, p.machines[0].y_pos);
@@ -999,9 +1236,10 @@ mod tests {
         assert_eq!(p.machines[1].table, other.table);
         assert_eq!(p.machines[1].start_x, other.start_x);
 
+        let num_states = p.machines[0].num_states;
         for sy0 in 0..p.num_symbols {
-            for st0 in 0..p.num_states {
-                let idx = (p.num_states * sy0 + st0) * 3;
+            for st0 in 0..num_states {
+                let idx = (num_states * sy0 + st0) * 3;
                 let write = p.machines[0].table[idx + 1];
                 assert!(write >= 1 && write < p.num_symbols as i32);
             }
@@ -1012,7 +1250,7 @@ mod tests {
     #[test]
     fn mutate_all_rewrites_every_machine() {
         let mut p = Program::new_random(2, 2);
-        p.add_machine();
+        p.add_machine(2);
         for machine in &mut p.machines {
             for chunk in machine.table.chunks_mut(3) {
                 chunk[1] = 0;
@@ -1039,8 +1277,8 @@ mod tests {
                 starts[i]
             );
             for sy0 in 0..p.num_symbols {
-                for st0 in 0..p.num_states {
-                    let idx = (p.num_states * sy0 + st0) * 3;
+                for st0 in 0..machine.num_states {
+                    let idx = (machine.num_states * sy0 + st0) * 3;
                     let write = machine.table[idx + 1];
                     assert!(write >= 1 && write < p.num_symbols as i32);
                 }
@@ -1119,17 +1357,16 @@ mod tests {
     #[test]
     fn two_machines_use_distinct_colors_for_same_symbol() {
         let m0 = {
-            let mut m = fixed_machine(vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 0, 0);
+            let mut m = fixed_machine(1, vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 0, 0);
             m.palette.colors[1] = [10, 20, 30];
             m
         };
         let m1 = {
-            let mut m = fixed_machine(vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 1, 0);
+            let mut m = fixed_machine(1, vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 1, 0);
             m.palette.colors[1] = [40, 50, 60];
             m
         };
         let mut p = Program {
-            num_states: 1,
             num_symbols: 2,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
@@ -1141,6 +1378,7 @@ mod tests {
             machines: vec![m0, m1],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
         p.update(1);
         assert_eq!(p.map[0], 1);
@@ -1170,7 +1408,7 @@ mod tests {
     fn add_machine_clones_canvas_palette() {
         let mut p = Program::new_random(2, 3);
         p.canvas_palette.set_kind(PaletteKind::Sunset, 3);
-        p.add_machine();
+        p.add_machine(2);
         assert_eq!(p.machines[1].palette.kind, PaletteKind::Sunset);
         assert_eq!(p.machines[1].palette.colors, p.canvas_palette.colors);
     }
@@ -1180,8 +1418,10 @@ mod tests {
         let mut p = Program::new_random(2, 3);
         p.machines[0].palette.set_kind(PaletteKind::Neon, 3);
         let colors = p.machines[0].palette.colors;
-        p.randomize(2, 3);
+        p.randomize(3);
         assert_eq!(p.machines[0].palette.kind, PaletteKind::Neon);
         assert_eq!(p.machines[0].palette.colors, colors);
+        assert_eq!(p.machines[0].num_states, 2);
+        assert_eq!(p.num_symbols, 3);
     }
 }

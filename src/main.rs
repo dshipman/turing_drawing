@@ -19,9 +19,10 @@ use turing_drawing::gpu_raster::{self, RasterMode};
 use turing_drawing::palette::{parse_hex_rgb, rgb_to_hex, Palette, PaletteKind};
 use turing_drawing::preset::{self, PresetInfo, PresetSort};
 use turing_drawing::program::{
-    default_machine_name, remap_index_after_reorder, step_rate, Program, DEFAULT_MUTATE_PERCENT,
-    MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_MUTATE_PERCENT, MAX_STATES, MAX_SYMBOLS,
-    MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES, MIN_SYMBOLS,
+    default_machine_name, remap_index_after_reorder, step_rate, Program, ScheduleMode,
+    DEFAULT_MUTATE_PERCENT, MACHINE_SPEED_STEP, MAX_MACHINE_SPEED, MAX_MAP_SIZE, MAX_MUTATE_PERCENT,
+    MAX_STATES, MAX_SYMBOLS, MIN_MACHINE_SPEED, MIN_MAP_SIZE, MIN_MUTATE_PERCENT, MIN_STATES,
+    MIN_SYMBOLS,
 };
 use turing_drawing::settings::{
     self, Action, BindTarget, PerformanceBindings, UserSettings, DEFAULT_MAX_ITRS, MAX_MAX_ITRS,
@@ -53,6 +54,9 @@ const SETTINGS_OVERLAY_MIN: Size = Size::new(480.0, 280.0);
 const PRESET_OVERLAY_DEFAULT: Size = Size::new(520.0, 460.0);
 const PRESET_OVERLAY_MIN: Size = Size::new(400.0, 240.0);
 const OVERLAY_WINDOW_MARGIN: f32 = 40.0;
+const SIM_SPEED_MIN: f32 = 0.0;
+const SIM_SPEED_MAX: f32 = 1.0;
+const SIM_SPEED_STEP: f32 = 0.001;
 const RESOLUTION_PRESETS: [ResolutionPreset; 18] = [
     ResolutionPreset::square(512, "512 × 512"),
     ResolutionPreset::square(1024, "1024 × 1024"),
@@ -111,6 +115,29 @@ fn parse_refresh_hz(text: &str) -> Result<u32, String> {
         Err(_) => Err(format!(
             "Refresh rate must be an integer {MIN_REFRESH_HZ}..={MAX_REFRESH_HZ}"
         )),
+    }
+}
+
+fn parse_clamped_f32(text: &str, min: f32, max: f32) -> Result<f32, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("Value is empty".into());
+    }
+    match trimmed.parse::<f32>() {
+        Ok(v) if v.is_finite() => Ok(v.clamp(min, max)),
+        _ => Err("Value must be a finite number".into()),
+    }
+}
+
+fn format_sim_speed(speed: f32) -> String {
+    format!("{speed:.3}")
+}
+
+fn format_machine_speed(speed: f32) -> String {
+    if speed.abs() < 1e-4 {
+        "0.00".into()
+    } else {
+        format!("{speed:+.2}")
     }
 }
 
@@ -199,10 +226,11 @@ fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Mess
 
 struct App {
     program: Program,
-    num_states: usize,
     num_symbols: usize,
     /// Fraction of `max_itrs` to run each tick (`0.0` = paused, `1.0` = max).
     speed: f32,
+    /// Text field for the global speed slider.
+    speed_text: String,
     /// Target simulation ticks per second.
     refresh_hz: u32,
     /// Text field for a custom refresh-rate value.
@@ -214,6 +242,8 @@ struct App {
     /// Max simulation rounds to run each tick at speed `1.0`.
     max_itrs: u64,
     share_texts: Vec<String>,
+    /// Draft text for each machine's speed field (parallel to `share_texts`).
+    machine_speed_texts: Vec<String>,
     status: String,
     /// Cached RGBA frame; rebuilt when the map changes.
     pixels: Vec<u8>,
@@ -269,6 +299,7 @@ struct App {
     settings_width_text: String,
     settings_height_text: String,
     settings_refresh_text: String,
+    settings_speed_text: String,
     settings_gradient_start: String,
     settings_gradient_end: String,
 }
@@ -306,6 +337,7 @@ enum Message {
     IncSymbols,
     DecSymbols,
     SpeedChanged(f32),
+    SpeedText(String),
     RefreshPreset(u32),
     RefreshHzText(String),
     ResolutionPreset(usize, usize),
@@ -337,7 +369,9 @@ enum Message {
     OverlayResizeMove(Point),
     OverlayResizeEnd,
     MachineSpeedChanged(usize, f32),
+    MachineSpeedText(usize, String),
     ToggleMachineActive(usize, bool),
+    ScheduleModeToggled(bool),
     TogglePickStart(usize),
     CanvasClicked {
         x: f32,
@@ -388,6 +422,7 @@ enum Message {
     SettingsWidthText(String),
     SettingsHeightText(String),
     SettingsSpeed(f32),
+    SettingsSpeedText(String),
     SettingsRefreshPreset(u32),
     SettingsRefreshText(String),
     SettingsMaxItrs(f32),
@@ -422,6 +457,7 @@ impl App {
         for machine in &mut program.machines {
             machine.palette = palette.clone();
         }
+        program.set_schedule_mode(defaults.schedule_mode);
         program.set_tape_init(TapeInit::from_kind_and_params(
             defaults.tape_kind,
             defaults.gaussian_mean,
@@ -430,6 +466,11 @@ impl App {
             defaults.perlin_octaves,
         ));
         let share_texts = vec![program.machine_encoding(0)];
+        let machine_speed_texts = program
+            .machines
+            .iter()
+            .map(|m| format_machine_speed(m.speed))
+            .collect();
         let pixels = program.canvas.clone();
         let frame = Handle::from_rgba(program.width as u32, program.height as u32, pixels.clone());
         let init_dirty = DirtyRect::full(program.width as u32, program.height as u32);
@@ -438,15 +479,16 @@ impl App {
         (
             Self {
                 program,
-                num_states,
                 num_symbols,
                 speed: defaults.speed,
+                speed_text: format_sim_speed(defaults.speed),
                 refresh_hz: defaults.refresh_hz,
                 refresh_hz_text: defaults.refresh_hz.to_string(),
                 map_width_text: defaults.map_width.to_string(),
                 map_height_text: defaults.map_height.to_string(),
                 max_itrs: defaults.max_itrs,
                 share_texts,
+                machine_speed_texts,
                 status: String::new(),
                 pixels,
                 gpu_dirty: Some(init_dirty),
@@ -482,6 +524,7 @@ impl App {
                 settings_width_text: defaults.map_width.to_string(),
                 settings_height_text: defaults.map_height.to_string(),
                 settings_refresh_text: defaults.refresh_hz.to_string(),
+                settings_speed_text: format_sim_speed(defaults.speed),
                 settings_gradient_start: defaults.gradient_start,
                 settings_gradient_end: defaults.gradient_end,
             },
@@ -521,6 +564,16 @@ impl App {
     fn sync_share_texts(&mut self) {
         self.share_texts = (0..self.program.machines.len())
             .map(|i| self.program.machine_encoding(i))
+            .collect();
+        self.sync_machine_speed_texts();
+    }
+
+    fn sync_machine_speed_texts(&mut self) {
+        self.machine_speed_texts = self
+            .program
+            .machines
+            .iter()
+            .map(|m| format_machine_speed(m.speed))
             .collect();
     }
 
@@ -708,6 +761,7 @@ impl App {
         self.settings_width_text = d.map_width.to_string();
         self.settings_height_text = d.map_height.to_string();
         self.settings_refresh_text = d.refresh_hz.to_string();
+        self.settings_speed_text = format_sim_speed(d.speed);
         self.settings_gradient_start = d.gradient_start.clone();
         self.settings_gradient_end = d.gradient_end.clone();
     }
@@ -730,11 +784,12 @@ impl App {
     }
 
     fn apply_loaded_program(&mut self, mut program: Program, label: &str) {
+        let schedule_mode = self.program.schedule_mode;
         program.canvas_palette = self.program.canvas_palette.clone();
         program.canvas_palette.resolve(program.num_symbols);
+        program.schedule_mode = schedule_mode;
         program.reset();
         self.program = program;
-        self.num_states = self.program.num_states;
         self.num_symbols = self.program.num_symbols;
         self.sync_resolution_text();
         self.selected_machine = None;
@@ -785,14 +840,44 @@ impl App {
                 Task::none()
             }
             Message::IncStates => {
-                if self.num_states < MAX_STATES {
-                    self.num_states += 1;
+                let index = self.selected_machine.unwrap_or(0);
+                let Some(current) = self.program.machines.get(index).map(|m| m.num_states) else {
+                    return Task::none();
+                };
+                let next = current.saturating_add(1).min(MAX_STATES);
+                if next != current {
+                    match self.program.set_machine_num_states(index, next) {
+                        Ok(()) => {
+                            self.sync_share_texts();
+                            let name = self.program.machines[index].display_name(index);
+                            self.status = format!("{name}: {next} states; program reset");
+                            self.refresh_frame();
+                        }
+                        Err(e) => {
+                            self.status = e;
+                        }
+                    }
                 }
                 Task::none()
             }
             Message::DecStates => {
-                if self.num_states > MIN_STATES {
-                    self.num_states -= 1;
+                let index = self.selected_machine.unwrap_or(0);
+                let Some(current) = self.program.machines.get(index).map(|m| m.num_states) else {
+                    return Task::none();
+                };
+                let next = current.saturating_sub(1).max(MIN_STATES);
+                if next != current {
+                    match self.program.set_machine_num_states(index, next) {
+                        Ok(()) => {
+                            self.sync_share_texts();
+                            let name = self.program.machines[index].display_name(index);
+                            self.status = format!("{name}: {next} states; program reset");
+                            self.refresh_frame();
+                        }
+                        Err(e) => {
+                            self.status = e;
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -811,7 +896,16 @@ impl App {
                 Task::none()
             }
             Message::SpeedChanged(speed) => {
-                self.speed = speed.clamp(0.0, 1.0);
+                self.speed = speed.clamp(SIM_SPEED_MIN, SIM_SPEED_MAX);
+                self.speed_text = format_sim_speed(self.speed);
+                Task::none()
+            }
+            Message::SpeedText(text) => {
+                self.speed_text = text;
+                if let Ok(speed) = parse_clamped_f32(&self.speed_text, SIM_SPEED_MIN, SIM_SPEED_MAX)
+                {
+                    self.speed = speed;
+                }
                 Task::none()
             }
             Message::RefreshPreset(hz) => {
@@ -901,12 +995,11 @@ impl App {
                 Task::none()
             }
             Message::Random => {
-                self.program.randomize(self.num_states, self.num_symbols);
+                self.program.randomize(self.num_symbols);
                 self.sync_share_texts();
                 self.status = format!(
-                    "New machines: {} machine(s), {} states, {} symbols",
+                    "New machines: {} machine(s), {} symbols",
                     self.program.machines.len(),
-                    self.num_states,
                     self.num_symbols
                 );
                 self.refresh_frame();
@@ -933,10 +1026,11 @@ impl App {
                 Task::none()
             }
             Message::AddMachine => {
-                self.program.add_machine();
+                let num_states = self.settings.defaults.num_states;
+                self.program.add_machine(num_states);
                 self.sync_share_texts();
                 self.status = format!(
-                    "Added machine ({} total); program reset",
+                    "Added machine with {num_states} states ({} total); program reset",
                     self.program.machines.len()
                 );
                 self.refresh_frame();
@@ -1137,12 +1231,31 @@ impl App {
             }
             Message::MachineSpeedChanged(i, speed) => {
                 match self.program.set_machine_speed(i, speed) {
-                    Ok(()) => Task::none(),
+                    Ok(()) => {
+                        if let Some(slot) = self.machine_speed_texts.get_mut(i) {
+                            *slot = format_machine_speed(self.program.machines[i].speed);
+                        }
+                        Task::none()
+                    }
                     Err(e) => {
                         self.status = e;
                         Task::none()
                     }
                 }
+            }
+            Message::MachineSpeedText(i, text) => {
+                if let Some(slot) = self.machine_speed_texts.get_mut(i) {
+                    *slot = text;
+                }
+                if let Some(slot) = self.machine_speed_texts.get(i) {
+                    if let Ok(speed) = parse_clamped_f32(slot, MIN_MACHINE_SPEED, MAX_MACHINE_SPEED)
+                    {
+                        if let Err(e) = self.program.set_machine_speed(i, speed) {
+                            self.status = e;
+                        }
+                    }
+                }
+                Task::none()
             }
             Message::ToggleMachineActive(i, active) => {
                 match self.program.set_machine_active(i, active) {
@@ -1152,6 +1265,17 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            Message::ScheduleModeToggled(normalised) => {
+                let mode = if normalised {
+                    ScheduleMode::Normalised
+                } else {
+                    ScheduleMode::Absolute
+                };
+                self.program.set_schedule_mode(mode);
+                self.settings.defaults.schedule_mode = mode;
+                self.persist_settings();
+                Task::none()
             }
             Message::ShareChanged(i, s) => {
                 if let Some(slot) = self.share_texts.get_mut(i) {
@@ -1176,7 +1300,6 @@ impl App {
                 };
                 match self.program.load_machine(i, &text) {
                     Ok(()) => {
-                        self.num_states = self.program.num_states;
                         self.num_symbols = self.program.num_symbols;
                         self.program.canvas_palette.resolve(self.num_symbols);
                         self.sync_share_texts();
@@ -1620,8 +1743,19 @@ impl App {
                 Task::none()
             }
             Message::SettingsSpeed(speed) => {
-                self.settings.defaults.speed = speed.clamp(0.0, 1.0);
+                self.settings.defaults.speed = speed.clamp(SIM_SPEED_MIN, SIM_SPEED_MAX);
+                self.settings_speed_text = format_sim_speed(self.settings.defaults.speed);
                 self.persist_settings();
+                Task::none()
+            }
+            Message::SettingsSpeedText(text) => {
+                self.settings_speed_text = text;
+                if let Ok(speed) =
+                    parse_clamped_f32(&self.settings_speed_text, SIM_SPEED_MIN, SIM_SPEED_MAX)
+                {
+                    self.settings.defaults.speed = speed;
+                    self.persist_settings();
+                }
                 Task::none()
             }
             Message::SettingsRefreshPreset(hz) => {
@@ -1863,6 +1997,13 @@ impl App {
             let text = self.share_texts.remove(from);
             self.share_texts.insert(to, text);
         }
+        if from != to
+            && from < self.machine_speed_texts.len()
+            && to < self.machine_speed_texts.len()
+        {
+            let text = self.machine_speed_texts.remove(from);
+            self.machine_speed_texts.insert(to, text);
+        }
         if let Some(selected) = self.selected_machine {
             self.selected_machine = Some(remap_index_after_reorder(selected, from, to));
         }
@@ -2074,10 +2215,26 @@ impl App {
 
             list = list.push(
                 mouse_area(
-                    container(column![title, actions, machine_speed_slider(i, speed)].spacing(4))
-                        .padding(8)
-                        .width(Length::Fill)
-                        .style(chrome::machine_card(selected, active, dragging)),
+                    container(
+                        column![
+                            title,
+                            actions,
+                            machine_speed_slider(
+                                i,
+                                speed,
+                                self.machine_speed_texts
+                                    .get(i)
+                                    .map(String::as_str)
+                                    .unwrap_or(""),
+                                self.program.schedule_mode,
+                                self.program.scheduled_rate(i),
+                            ),
+                        ]
+                        .spacing(4),
+                    )
+                    .padding(8)
+                    .width(Length::Fill)
+                    .style(chrome::machine_card(selected, active, dragging)),
                 )
                 .on_press(Message::SelectMachine(i))
                 .on_enter(Message::MachineDragOver(i)),
@@ -2099,6 +2256,27 @@ impl App {
                 ),)
                 .padding(iced::Padding {
                     top: 4.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                    left: 0.0,
+                }),
+            ]
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+            row![
+                container(chrome::dim("Normalised")).padding(iced::Padding {
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 4.0,
+                    left: 10.0,
+                }),
+                Space::new().width(Length::Fill),
+                container(
+                    toggler(self.program.schedule_mode == ScheduleMode::Normalised)
+                        .on_toggle(Message::ScheduleModeToggled),
+                )
+                .padding(iced::Padding {
+                    top: 0.0,
                     right: 8.0,
                     bottom: 4.0,
                     left: 0.0,
@@ -2168,18 +2346,6 @@ impl App {
     fn canvas_group(&self) -> Element<'_, Message> {
         let init = &self.program.tape_init;
         let mut col = column![
-            inspector_row(
-                "States",
-                stepper(
-                    self.num_states,
-                    Message::DecStates,
-                    Message::IncStates,
-                    Some((
-                        BindTarget::global(Action::DecStates),
-                        BindTarget::global(Action::IncStates),
-                    )),
-                ),
-            ),
             inspector_row(
                 "Symbols",
                 stepper(
@@ -2352,15 +2518,15 @@ impl App {
                 "Speed",
                 row![
                     chrome::param_slider(
-                        0.0..=1.0,
+                        SIM_SPEED_MIN..=SIM_SPEED_MAX,
                         self.speed,
-                        0.01_f32,
+                        SIM_SPEED_STEP,
                         Message::SpeedChanged,
                         Message::SpeedChanged(1.0),
                     ),
-                    chrome::dim(format!("{:.2}", self.speed))
-                        .width(36)
-                        .align_x(Alignment::End),
+                    chrome::compact_field("", &self.speed_text)
+                        .on_input(Message::SpeedText)
+                        .width(48),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -2455,6 +2621,18 @@ impl App {
                     chrome::field(&name_placeholder, &machine.name)
                         .on_input(move |s| Message::MachineNameChanged(index, s))
                         .width(Length::Fill),
+                    inspector_row(
+                        "States",
+                        stepper(
+                            machine.num_states,
+                            Message::DecStates,
+                            Message::IncStates,
+                            Some((
+                                BindTarget::global(Action::DecStates),
+                                BindTarget::global(Action::IncStates),
+                            )),
+                        ),
+                    ),
                     chrome::dim(format!(
                         "State {}  ·  ({}, {})  ·  start ({}, {})",
                         machine.state,
@@ -2541,7 +2719,7 @@ impl App {
                             chrome::dim(format!(
                                 "{} machine(s), {} states × {} symbols · {}",
                                 info.num_machines,
-                                info.num_states,
+                                info.states_label(),
                                 info.num_symbols,
                                 preset::format_saved_at(info.saved_at)
                             )),
@@ -2797,7 +2975,7 @@ impl App {
         column![
             chrome::dim("CANVAS"),
             inspector_row(
-                "States",
+                "Default states",
                 stepper(
                     d.num_states,
                     Message::SettingsDecStates,
@@ -2854,15 +3032,15 @@ impl App {
                 "Speed",
                 row![
                     chrome::param_slider(
-                        0.0..=1.0,
+                        SIM_SPEED_MIN..=SIM_SPEED_MAX,
                         d.speed,
-                        0.01_f32,
+                        SIM_SPEED_STEP,
                         Message::SettingsSpeed,
                         Message::SettingsSpeed(1.0),
                     ),
-                    chrome::dim(format!("{:.2}", d.speed))
-                        .width(36)
-                        .align_x(Alignment::End),
+                    chrome::compact_field("", &self.settings_speed_text)
+                        .on_input(Message::SettingsSpeedText)
+                        .width(48),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -3133,31 +3311,39 @@ fn machine_active_toggler(index: usize, active: bool) -> Element<'static, Messag
         .into()
 }
 
-fn machine_speed_slider(index: usize, speed: f32) -> Element<'static, Message> {
+fn machine_speed_slider<'a>(
+    index: usize,
+    speed: f32,
+    speed_text: &'a str,
+    schedule_mode: ScheduleMode,
+    scheduled_rate: f64,
+) -> Element<'a, Message> {
+    let readout = match schedule_mode {
+        ScheduleMode::Absolute => format!("×{:.2}", step_rate(speed)),
+        ScheduleMode::Normalised => {
+            if scheduled_rate <= 0.0 {
+                "—".into()
+            } else {
+                format!("{:.0}%", scheduled_rate * 100.0)
+            }
+        }
+    };
     row![
         chrome::param_slider(
             MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED,
             speed,
-            0.1_f32,
+            MACHINE_SPEED_STEP,
             move |v| Message::MachineSpeedChanged(index, v),
             Message::MachineSpeedChanged(index, 0.0),
         ),
-        chrome::dim(machine_speed_label(speed))
-            .width(72)
-            .align_x(Alignment::End),
+        chrome::compact_field("", speed_text)
+            .on_input(move |s| Message::MachineSpeedText(index, s))
+            .width(48),
+        chrome::dim(readout).width(40).align_x(Alignment::End),
     ]
     .spacing(6)
     .align_y(Alignment::Center)
     .into()
-}
-
-fn machine_speed_label(speed: f32) -> String {
-    let rate = step_rate(speed);
-    if speed.abs() < 1e-4 {
-        "0.0  ×1.00".into()
-    } else {
-        format!("{speed:+.1}  ×{rate:.2}")
-    }
 }
 
 #[cfg(test)]
@@ -3192,5 +3378,18 @@ mod tests {
         assert!(parse_map_dim("63", "Width").is_err());
         assert!(parse_map_dim("4097", "Height").is_err());
         assert!(parse_map_dim("0", "Width").is_err());
+    }
+
+    #[test]
+    fn parse_clamped_f32_clamps_and_rejects_invalid() {
+        assert_eq!(parse_clamped_f32("0.5", 0.0, 1.0).unwrap(), 0.5);
+        assert_eq!(parse_clamped_f32(" 1.25 ", 0.0, 1.0).unwrap(), 1.0);
+        assert_eq!(parse_clamped_f32("-3", -10.0, 10.0).unwrap(), -3.0);
+        assert_eq!(parse_clamped_f32("15", -10.0, 10.0).unwrap(), 10.0);
+        assert_eq!(parse_clamped_f32("+2.50", -10.0, 10.0).unwrap(), 2.5);
+        assert!(parse_clamped_f32("", 0.0, 1.0).is_err());
+        assert!(parse_clamped_f32("abc", 0.0, 1.0).is_err());
+        assert!(parse_clamped_f32("inf", 0.0, 1.0).is_err());
+        assert!(parse_clamped_f32("nan", 0.0, 1.0).is_err());
     }
 }

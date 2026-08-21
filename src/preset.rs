@@ -12,11 +12,11 @@ use crate::machine::{
     MIN_SYMBOLS,
 };
 use crate::palette::{empty_canvas, Palette, PaletteSpec};
-use crate::program::Program;
+use crate::program::{Program, ScheduleMode};
 use crate::settings::PresetPerformanceBinding;
 use crate::tape::TapeInit;
 
-const PRESET_VERSION: u32 = 4;
+const PRESET_VERSION: u32 = 5;
 const MIN_PRESET_VERSION: u32 = 1;
 const PRESETS_SUBDIR: &str = "presets";
 
@@ -31,6 +31,9 @@ pub struct PresetMachine {
     #[serde(default)]
     pub name: String,
     pub table: Vec<i32>,
+    /// Per-machine state count. `0` or missing inherits [`Preset::num_states`].
+    #[serde(default)]
+    pub num_states: usize,
     /// Per-machine drawing palette. Missing in older files (Classic).
     #[serde(default)]
     pub palette: PaletteSpec,
@@ -38,6 +41,15 @@ pub struct PresetMachine {
 
 fn default_active() -> bool {
     true
+}
+
+/// Resolve a machine's state count: per-machine value, or preset-level inherit.
+pub fn machine_num_states(preset: &Preset, machine: &PresetMachine) -> usize {
+    if machine.num_states == 0 {
+        preset.num_states
+    } else {
+        machine.num_states
+    }
 }
 
 /// Full program starting state saved as a named preset.
@@ -48,6 +60,9 @@ pub struct Preset {
     /// Unix timestamp (seconds) of the last Store. Missing in older files.
     #[serde(default)]
     pub saved_at: u64,
+    /// Legacy / summary state count. New saves use the first machine's count
+    /// (or the shared count when all machines match). Older files store the
+    /// uniform count that every machine inherited.
     pub num_states: usize,
     pub num_symbols: usize,
     #[serde(default = "default_map_width")]
@@ -89,9 +104,23 @@ impl std::fmt::Display for PresetSort {
 pub struct PresetInfo {
     pub name: String,
     pub num_machines: usize,
-    pub num_states: usize,
+    /// Minimum state count among machines (after inherit).
+    pub num_states_min: usize,
+    /// Maximum state count among machines (after inherit).
+    pub num_states_max: usize,
     pub num_symbols: usize,
     pub saved_at: u64,
+}
+
+impl PresetInfo {
+    /// Human-readable state summary: `3` or `3–5` when machines differ.
+    pub fn states_label(&self) -> String {
+        if self.num_states_min == self.num_states_max {
+            self.num_states_min.to_string()
+        } else {
+            format!("{}–{}", self.num_states_min, self.num_states_max)
+        }
+    }
 }
 
 impl Program {
@@ -105,11 +134,12 @@ impl Program {
             return Err("program has no machines".into());
         }
 
+        let summary_states = self.machines[0].num_states;
         Ok(Preset {
             version: PRESET_VERSION,
             name: name.to_string(),
             saved_at: 0,
-            num_states: self.num_states,
+            num_states: summary_states,
             num_symbols: self.num_symbols,
             map_width: self.width,
             map_height: self.height,
@@ -123,6 +153,7 @@ impl Program {
                     active: m.active,
                     name: m.name.clone(),
                     table: m.table.clone(),
+                    num_states: m.num_states,
                     palette: m.palette.to_spec(),
                 })
                 .collect(),
@@ -150,7 +181,9 @@ impl Program {
                 } else {
                     m.name.clone()
                 };
+                let num_states = machine_num_states(preset, m);
                 Machine {
+                    num_states,
                     table: m.table.clone(),
                     state: 0,
                     x_pos: start_x,
@@ -175,7 +208,6 @@ impl Program {
             .map(|m| m.palette.clone())
             .unwrap_or_else(Palette::classic);
         let mut prog = Self {
-            num_states: preset.num_states,
             num_symbols: preset.num_symbols,
             width,
             height,
@@ -187,6 +219,7 @@ impl Program {
             machines,
             itr_count: 0,
             tape_init,
+            schedule_mode: ScheduleMode::Absolute,
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -221,8 +254,15 @@ fn validate_preset(preset: &Preset) -> Result<(), String> {
         return Err("preset has no machines".into());
     }
 
-    let expected = preset.num_states * preset.num_symbols * 3;
     for (i, m) in preset.machines.iter().enumerate() {
+        let num_states = machine_num_states(preset, m);
+        if num_states < MIN_STATES || num_states > MAX_STATES {
+            return Err(format!(
+                "machine {}: num states must be {MIN_STATES}..={MAX_STATES}, got {num_states}",
+                i + 1
+            ));
+        }
+        let expected = num_states * preset.num_symbols * 3;
         if m.table.len() != expected {
             return Err(format!(
                 "machine {}: table length {}, expected {expected}",
@@ -414,10 +454,22 @@ pub fn list_presets() -> Result<Vec<PresetInfo>, String> {
         } else {
             file_mtime_secs(&path).unwrap_or(0)
         };
+        let mut states_min = usize::MAX;
+        let mut states_max = 0usize;
+        for m in &preset.machines {
+            let n = machine_num_states(&preset, m);
+            states_min = states_min.min(n);
+            states_max = states_max.max(n);
+        }
+        if states_min == usize::MAX {
+            states_min = preset.num_states;
+            states_max = preset.num_states;
+        }
         infos.push(PresetInfo {
             name: preset.name,
             num_machines: preset.machines.len(),
-            num_states: preset.num_states,
+            num_states_min: states_min,
+            num_states_max: states_max,
             num_symbols: preset.num_symbols,
             saved_at,
         });
@@ -456,8 +508,9 @@ mod tests {
 
     static FS_LOCK: Mutex<()> = Mutex::new(());
 
-    fn fixed_machine(table: Vec<i32>, start_x: i32, start_y: i32, speed: f32) -> Machine {
+    fn fixed_machine(num_states: usize, table: Vec<i32>, start_x: i32, start_y: i32, speed: f32) -> Machine {
         Machine {
+            num_states,
             table,
             state: 0,
             x_pos: start_x,
@@ -484,10 +537,9 @@ mod tests {
 
     #[test]
     fn roundtrip_program_preset() {
-        let m0 = fixed_machine(vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 10, 20, 2.5);
-        let m1 = fixed_machine(vec![0, 1, ACTION_DOWN, 0, 1, ACTION_DOWN], 30, 40, -1.0);
+        let m0 = fixed_machine(1, vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 10, 20, 2.5);
+        let m1 = fixed_machine(1, vec![0, 1, ACTION_DOWN, 0, 1, ACTION_DOWN], 30, 40, -1.0);
         let mut p = Program {
-            num_states: 1,
             num_symbols: 2,
             width: DEFAULT_MAP_WIDTH,
             height: DEFAULT_MAP_HEIGHT,
@@ -499,6 +551,7 @@ mod tests {
             machines: vec![m0.clone(), m1.clone()],
             itr_count: 0,
             tape_init: TapeInit::default(),
+            schedule_mode: ScheduleMode::Absolute,
         };
         p.update(5);
         assert!(p.itr_count > 0);
@@ -508,9 +561,11 @@ mod tests {
         assert_eq!(preset.machines.len(), 2);
         assert_eq!(preset.machines[0].speed, 2.5);
         assert_eq!(preset.machines[0].start_x, 10);
+        assert_eq!(preset.machines[0].num_states, 1);
+        assert_eq!(preset.machines[1].num_states, 1);
 
         let q = Program::from_preset(&preset).unwrap();
-        assert_eq!(q.num_states, 1);
+        assert_eq!(q.machines[0].num_states, 1);
         assert_eq!(q.num_symbols, 2);
         assert_eq!(q.width, DEFAULT_MAP_WIDTH);
         assert_eq!(q.height, DEFAULT_MAP_HEIGHT);
@@ -525,6 +580,22 @@ mod tests {
         assert!(q.map.iter().all(|&s| s == 0));
         assert_eq!(q.machines[0].x_pos, 10);
         assert_eq!(q.machines[0].state, 0);
+    }
+
+    #[test]
+    fn mixed_state_counts_roundtrip() {
+        let mut p = Program::new_random(2, 3);
+        p.add_machine(5);
+        assert_eq!(p.machines[0].num_states, 2);
+        assert_eq!(p.machines[1].num_states, 5);
+        let preset = p.to_preset("mixed").unwrap();
+        assert_eq!(preset.machines[0].num_states, 2);
+        assert_eq!(preset.machines[1].num_states, 5);
+        let q = Program::from_preset(&preset).unwrap();
+        assert_eq!(q.machines[0].num_states, 2);
+        assert_eq!(q.machines[1].num_states, 5);
+        assert_eq!(q.machines[0].table.len(), 2 * 3 * 3);
+        assert_eq!(q.machines[1].table.len(), 5 * 3 * 3);
     }
 
     #[test]
@@ -544,6 +615,7 @@ mod tests {
                 active: true,
                 name: String::new(),
                 table: vec![0, 1, 0, 0, 1, 0],
+                num_states: 1,
                 palette: PaletteSpec::default(),
             }],
             performance_bindings: Vec::new(),
@@ -557,6 +629,7 @@ mod tests {
 
         bad = good.clone();
         bad.num_states = 0;
+        bad.machines[0].num_states = 0;
         assert!(validate_preset(&bad).is_err());
 
         bad = good.clone();
@@ -643,6 +716,7 @@ mod tests {
 
         let loaded = load_preset(&name_space).unwrap();
         assert_eq!(loaded.num_states, 3);
+        assert_eq!(loaded.machines[0].num_states, 3);
         assert_eq!(loaded.num_symbols, 3);
 
         delete_preset(&name_under).unwrap();
@@ -652,7 +726,8 @@ mod tests {
         PresetInfo {
             name: name.into(),
             num_machines: 1,
-            num_states: 2,
+            num_states_min: 2,
+            num_states_max: 2,
             num_symbols: 2,
             saved_at,
         }
@@ -692,12 +767,14 @@ mod tests {
         assert!(validate_preset(&preset).is_ok());
         let q = Program::from_preset(&preset).unwrap();
         assert_eq!(q.machines[0].name, "Machine 1");
+        assert_eq!(q.machines[0].num_states, 1);
+        assert_eq!(preset.machines[0].num_states, 0);
     }
 
     #[test]
     fn machine_name_roundtrips_in_preset() {
         let mut p = Program::new_random(2, 2);
-        p.add_machine();
+        p.add_machine(2);
         p.machines[0].name = "Walker".into();
         p.machines[1].name = "Hopper".into();
         let preset = p.to_preset("named").unwrap();
@@ -740,6 +817,7 @@ mod tests {
                 active: true,
                 name: String::new(),
                 table: vec![0, 1, 0, 0, 1, 0],
+                num_states: 1,
                 palette: PaletteSpec::default(),
             }],
             performance_bindings: Vec::new(),
@@ -749,6 +827,28 @@ mod tests {
         bad.map_width = 512;
         bad.map_height = 9000;
         assert!(validate_preset(&bad).is_err());
+    }
+
+    #[test]
+    fn states_label_uniform_and_mixed() {
+        let uniform = PresetInfo {
+            name: "a".into(),
+            num_machines: 2,
+            num_states_min: 3,
+            num_states_max: 3,
+            num_symbols: 3,
+            saved_at: 0,
+        };
+        assert_eq!(uniform.states_label(), "3");
+        let mixed = PresetInfo {
+            name: "b".into(),
+            num_machines: 2,
+            num_states_min: 3,
+            num_states_max: 5,
+            num_symbols: 3,
+            saved_at: 0,
+        };
+        assert_eq!(mixed.states_label(), "3–5");
     }
 
     #[test]

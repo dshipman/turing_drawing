@@ -14,6 +14,7 @@ use crate::machine::{
 use crate::palette::{
     parse_hex_rgb, rgb_to_hex, PaletteKind, DEFAULT_GRADIENT_END, DEFAULT_GRADIENT_START,
 };
+use crate::program::ScheduleMode;
 use crate::tape::{
     TapeInitKind, DEFAULT_GAUSSIAN_MEAN, DEFAULT_GAUSSIAN_SIGMA, DEFAULT_PERLIN_OCTAVES,
     DEFAULT_PERLIN_SCALE, MAX_GAUSSIAN_MEAN, MAX_GAUSSIAN_SIGMA, MAX_PERLIN_OCTAVES,
@@ -566,6 +567,9 @@ fn is_unusable_named(named: key::Named) -> bool {
 }
 
 /// Startup values for the right-hand inspector.
+///
+/// `num_states` is the default state count for the first machine at launch and
+/// for machines added with Add machine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PanelDefaults {
     #[serde(default = "default_num_states")]
@@ -593,6 +597,8 @@ pub struct PanelDefaults {
     #[serde(default = "default_max_itrs")]
     pub max_itrs: u64,
     #[serde(default)]
+    pub schedule_mode: ScheduleMode,
+    #[serde(default)]
     pub raster_mode: RasterMode,
     #[serde(default)]
     pub palette_kind: PaletteKind,
@@ -603,7 +609,7 @@ pub struct PanelDefaults {
 }
 
 fn default_num_states() -> usize {
-    4
+    3
 }
 fn default_num_symbols() -> usize {
     3
@@ -657,6 +663,7 @@ impl Default for PanelDefaults {
             speed: default_speed(),
             refresh_hz: default_refresh_hz(),
             max_itrs: default_max_itrs(),
+            schedule_mode: ScheduleMode::Absolute,
             raster_mode: RasterMode::Gpu,
             palette_kind: PaletteKind::Classic,
             gradient_start: default_gradient_start(),

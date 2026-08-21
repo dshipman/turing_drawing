@@ -218,6 +218,17 @@ pub fn field<'a, Message: Clone + 'a>(
         .style(text_input_style)
 }
 
+/// Compact numeric field for slider values (matches dim label size).
+pub fn compact_field<'a, Message: Clone + 'a>(
+    placeholder: &str,
+    value: &str,
+) -> text_input::TextInput<'a, Message> {
+    text_input(placeholder, value)
+        .padding(FIELD_PAD)
+        .size(FONT_SMALL)
+        .style(text_input_style)
+}
+
 pub fn hrule<'a>() -> rule::Rule<'a> {
     rule::horizontal(1).style(rule_style)
 }
