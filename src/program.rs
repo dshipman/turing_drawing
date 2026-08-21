@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dirty::DirtyRect;
-use crate::machine::{validate_map_size, wrap_pos, Machine};
+use crate::machine::{table_has_diagonal_actions, validate_map_size, wrap_pos, Machine};
 use crate::palette::{empty_canvas, fill_rgba_from_map, Palette};
 use crate::tape::{self, TapeInit};
 
@@ -70,6 +70,8 @@ pub struct Program {
     pub tape_init: TapeInit,
     /// Absolute vs normalised step-rate scheduling (session preference).
     pub schedule_mode: ScheduleMode,
+    /// When true, Random / Mutate / Add machine may pick diagonal move actions.
+    pub allow_diagonals: bool,
 }
 
 impl Program {
@@ -88,11 +90,22 @@ impl Program {
         width: usize,
         height: usize,
     ) -> Self {
+        Self::new_random_sized_with_diagonals(num_states, num_symbols, width, height, false)
+    }
+
+    pub fn new_random_sized_with_diagonals(
+        num_states: usize,
+        num_symbols: usize,
+        width: usize,
+        height: usize,
+        allow_diagonals: bool,
+    ) -> Self {
         assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
         assert!(validate_map_size(width, height).is_ok());
 
-        let mut machine = Machine::new_random(num_states, num_symbols, width, height);
+        let mut machine =
+            Machine::new_random(num_states, num_symbols, width, height, allow_diagonals);
         machine.name = default_machine_name(0);
         let canvas_palette = Palette::classic();
         machine.palette = canvas_palette.clone();
@@ -110,6 +123,7 @@ impl Program {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals,
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -122,6 +136,7 @@ impl Program {
         parsed.machine.name = default_machine_name(0);
         let canvas_palette = Palette::classic();
         parsed.machine.palette = canvas_palette.clone();
+        let allow_diagonals = table_has_diagonal_actions(&parsed.machine.table);
         let cells = DEFAULT_MAP_WIDTH * DEFAULT_MAP_HEIGHT;
         let mut prog = Self {
             num_symbols: parsed.num_symbols,
@@ -136,6 +151,7 @@ impl Program {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals,
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -216,10 +232,11 @@ impl Program {
         let state_counts: Vec<usize> = self.machines.iter().map(|m| m.num_states).collect();
         let n = self.machines.len().max(1);
         let (width, height) = (self.width, self.height);
+        let allow_diagonals = self.allow_diagonals;
         self.machines = (0..n)
             .map(|i| {
                 let num_states = state_counts.get(i).copied().unwrap_or(MIN_STATES);
-                Machine::new_random(num_states, num_symbols, width, height)
+                Machine::new_random(num_states, num_symbols, width, height, allow_diagonals)
             })
             .collect();
         for (i, machine) in self.machines.iter_mut().enumerate() {
@@ -261,8 +278,14 @@ impl Program {
         let id = self.machines[index].id;
         let palette = self.machines[index].palette.clone();
         let num_states = self.machines[index].num_states;
-        self.machines[index] =
-            Machine::new_random(num_states, self.num_symbols, self.width, self.height);
+        let allow_diagonals = self.allow_diagonals;
+        self.machines[index] = Machine::new_random(
+            num_states,
+            self.num_symbols,
+            self.width,
+            self.height,
+            allow_diagonals,
+        );
         self.machines[index].speed = speed;
         self.machines[index].active = active;
         self.machines[index].name = name;
@@ -275,18 +298,20 @@ impl Program {
     /// Re-randomize `percent` of one machine's transition rules. Does not reset.
     pub fn mutate_machine(&mut self, index: usize, percent: u8) -> Result<(), String> {
         let num_symbols = self.num_symbols;
+        let allow_diagonals = self.allow_diagonals;
         let Some(machine) = self.machines.get_mut(index) else {
             return Err("invalid machine index".into());
         };
-        machine.mutate_table(num_symbols, percent);
+        machine.mutate_table(num_symbols, percent, allow_diagonals);
         Ok(())
     }
 
     /// Re-randomize `percent` of every machine's transition rules. Does not reset.
     pub fn mutate_all(&mut self, percent: u8) {
         let num_symbols = self.num_symbols;
+        let allow_diagonals = self.allow_diagonals;
         for machine in &mut self.machines {
-            machine.mutate_table(num_symbols, percent);
+            machine.mutate_table(num_symbols, percent, allow_diagonals);
         }
     }
 
@@ -334,6 +359,12 @@ impl Program {
             self.schedule_mode = mode;
             self.reset_schedule_accumulators();
         }
+    }
+
+    /// Enable or disable diagonal actions for Random / Mutate / Add machine.
+    /// Does not rewrite existing tables or reset the drawing.
+    pub fn set_allow_diagonals(&mut self, allow: bool) {
+        self.allow_diagonals = allow;
     }
 
     /// Clear fractional step accruals on every machine (does not reset the drawing).
@@ -391,10 +422,11 @@ impl Program {
             ));
         }
         let num_symbols = self.num_symbols;
+        let allow_diagonals = self.allow_diagonals;
         let Some(machine) = self.machines.get_mut(index) else {
             return Err("invalid machine index".into());
         };
-        machine.resize_states(num_states, num_symbols);
+        machine.resize_states(num_states, num_symbols, allow_diagonals);
         self.reset();
         Ok(())
     }
@@ -403,8 +435,13 @@ impl Program {
     /// then reset the program.
     pub fn add_machine(&mut self, num_states: usize) {
         assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
-        let mut machine =
-            Machine::new_random(num_states, self.num_symbols, self.width, self.height);
+        let mut machine = Machine::new_random(
+            num_states,
+            self.num_symbols,
+            self.width,
+            self.height,
+            self.allow_diagonals,
+        );
         machine.name = default_machine_name(self.machines.len());
         machine.palette = self.canvas_palette.clone();
         self.machines.push(machine);
@@ -447,6 +484,9 @@ impl Program {
         }
 
         let parsed = Machine::from_string(s, self.width, self.height)?;
+        if table_has_diagonal_actions(&parsed.machine.table) {
+            self.allow_diagonals = true;
+        }
         let speed = self.machines[index].speed;
         let name = self.machines[index].name.clone();
         let id = self.machines[index].id;
@@ -561,7 +601,9 @@ impl Program {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::{Machine, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT};
+    use crate::machine::{
+        Machine, ACTION_DOWN, ACTION_DOWN_LEFT, ACTION_LEFT, ACTION_RIGHT, ACTION_UP_RIGHT,
+    };
     use crate::palette::{empty_canvas, rgb_at, Palette, PaletteKind};
     use crate::tape::{TapeInit, TapeInitKind};
 
@@ -604,6 +646,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
         }
     }
 
@@ -665,6 +708,80 @@ mod tests {
         let mut p = fixed_program(1, 2, vec![0, 1, ACTION_RIGHT], 0, 0);
         p.update(1);
         assert_eq!(p.machines[0].x_pos, (p.width - 1) as i32);
+    }
+
+    #[test]
+    fn diagonal_step_and_corner_wrap() {
+        // UP_RIGHT = (+1, -1): from (0, 0) wraps y to bottom.
+        let mut p = fixed_program(1, 2, vec![0, 1, ACTION_UP_RIGHT], 0, 0);
+        p.update(1);
+        assert_eq!(p.machines[0].x_pos, 1);
+        assert_eq!(p.machines[0].y_pos, (p.height - 1) as i32);
+
+        // Corner wrap: (width-1, 0) + UP_RIGHT → (0, height-1).
+        let width = p.width as i32;
+        let height = p.height as i32;
+        p.machines[0].x_pos = width - 1;
+        p.machines[0].y_pos = 0;
+        p.machines[0].state = 0;
+        let idx = (width - 1) as usize;
+        p.map[idx] = 0;
+        p.update(1);
+        assert_eq!(p.machines[0].x_pos, 0);
+        assert_eq!(p.machines[0].y_pos, height - 1);
+
+        // DOWN_LEFT = (−1, +1): from (0, height-1) → (width-1, 0).
+        p.machines[0].table = vec![0, 1, ACTION_DOWN_LEFT];
+        p.machines[0].x_pos = 0;
+        p.machines[0].y_pos = height - 1;
+        p.machines[0].state = 0;
+        let corner = ((height - 1) * width) as usize;
+        p.map[corner] = 0;
+        p.update(1);
+        assert_eq!(p.machines[0].x_pos, width - 1);
+        assert_eq!(p.machines[0].y_pos, 0);
+    }
+
+    #[test]
+    fn generated_actions_respect_diagonal_flag() {
+        for _ in 0..10 {
+            let p = Program::new_random(4, 3);
+            assert!(!p.allow_diagonals);
+            for chunk in p.machines[0].table.chunks_exact(3) {
+                assert!((0..4).contains(&chunk[2]), "cardinal-only action {}", chunk[2]);
+            }
+        }
+
+        let mut saw_diagonal = false;
+        for _ in 0..20 {
+            let p = Program::new_random_sized_with_diagonals(
+                8,
+                8,
+                DEFAULT_MAP_WIDTH,
+                DEFAULT_MAP_HEIGHT,
+                true,
+            );
+            assert!(p.allow_diagonals);
+            for chunk in p.machines[0].table.chunks_exact(3) {
+                assert!((0..8).contains(&chunk[2]), "8-dir action {}", chunk[2]);
+                if chunk[2] >= 4 {
+                    saw_diagonal = true;
+                }
+            }
+        }
+        assert!(saw_diagonal, "expected at least one diagonal action when enabled");
+    }
+
+    #[test]
+    fn encoding_with_diagonal_enables_flag() {
+        // 1 state × 2 symbols: both transitions use ACTION_UP_RIGHT (4).
+        let enc = format!("1,2,0,0,0,1,{ACTION_UP_RIGHT},0,1,{ACTION_UP_RIGHT}");
+        let p = Program::from_string(&enc).unwrap();
+        assert!(p.allow_diagonals);
+        p.machines[0]
+            .table
+            .chunks_exact(3)
+            .for_each(|c| assert_eq!(c[2], ACTION_UP_RIGHT));
     }
 
     #[test]
@@ -798,6 +915,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
         };
 
         p.update(1);
@@ -813,7 +931,7 @@ mod tests {
         p.add_machine(4);
         assert_eq!(p.machines.len(), 2);
 
-        let other = Machine::new_random(2, 2, p.width, p.height);
+        let other = Machine::new_random(2, 2, p.width, p.height, false);
         let enc = other.to_string(2);
         let err = p.load_machine(0, &enc).unwrap_err();
         assert!(err.contains("3 symbols"));
@@ -827,7 +945,7 @@ mod tests {
     fn load_allows_mismatched_states_when_multiple_machines() {
         let mut p = Program::new_random(4, 3);
         p.add_machine(4);
-        let other = Machine::new_random(2, 3, p.width, p.height);
+        let other = Machine::new_random(2, 3, p.width, p.height, false);
         let enc = other.to_string(3);
         p.load_machine(0, &enc).unwrap();
         assert_eq!(p.machines[0].num_states, 2);
@@ -839,7 +957,7 @@ mod tests {
     #[test]
     fn load_single_machine_may_change_counts() {
         let mut p = Program::new_random(4, 3);
-        let other = Machine::new_random(2, 2, p.width, p.height);
+        let other = Machine::new_random(2, 2, p.width, p.height, false);
         let enc = other.to_string(2);
         p.load_machine(0, &enc).unwrap();
         assert_eq!(p.machines[0].num_states, 2);
@@ -908,6 +1026,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
         };
 
         p.update(10);
@@ -942,6 +1061,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Normalised,
+            allow_diagonals: false,
         }
     }
 
@@ -1009,6 +1129,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
         };
 
         p.update(5);
@@ -1057,6 +1178,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
         };
         p.update(1);
         assert_eq!(p.machines[0].x_pos, 0);
@@ -1125,7 +1247,7 @@ mod tests {
         assert_eq!(p.machines[1].num_states, 5);
         assert_eq!(p.num_symbols, 3);
 
-        let enc = Machine::new_random(3, 3, p.width, p.height).to_string(3);
+        let enc = Machine::new_random(3, 3, p.width, p.height, false).to_string(3);
         p.load_machine(1, &enc).unwrap();
         assert_eq!(p.machines[1].name, "Hopper");
         assert_eq!(p.machines[1].num_states, 3);
@@ -1379,6 +1501,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
         };
         p.update(1);
         assert_eq!(p.map[0], 1);

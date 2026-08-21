@@ -16,7 +16,7 @@ use crate::program::{Program, ScheduleMode};
 use crate::settings::PresetPerformanceBinding;
 use crate::tape::TapeInit;
 
-const PRESET_VERSION: u32 = 5;
+const PRESET_VERSION: u32 = 6;
 const MIN_PRESET_VERSION: u32 = 1;
 const PRESETS_SUBDIR: &str = "presets";
 
@@ -76,6 +76,9 @@ pub struct Preset {
     /// How Restart fills the canvas. Missing in older files (Empty).
     #[serde(default)]
     pub tape_init: TapeInit,
+    /// When true, Random / Mutate may pick diagonal move actions. Missing → false.
+    #[serde(default)]
+    pub allow_diagonals: bool,
 }
 
 /// How the preset browser orders its list.
@@ -159,6 +162,7 @@ impl Program {
                 .collect(),
             performance_bindings: Vec::new(),
             tape_init: self.tape_init.clone(),
+            allow_diagonals: self.allow_diagonals,
         })
     }
 
@@ -220,6 +224,7 @@ impl Program {
             itr_count: 0,
             tape_init,
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: preset.allow_diagonals,
         };
         prog.ensure_machine_ids();
         prog.reset();
@@ -269,6 +274,16 @@ fn validate_preset(preset: &Preset) -> Result<(), String> {
                 i + 1,
                 m.table.len()
             ));
+        }
+        for (j, chunk) in m.table.chunks_exact(3).enumerate() {
+            let action = chunk[2];
+            if !(0..=7).contains(&action) {
+                return Err(format!(
+                    "machine {}: rule {}: invalid action {action} (expected 0..=7)",
+                    i + 1,
+                    j + 1
+                ));
+            }
         }
         // Speed is clamped on load; only reject non-finite values.
         if !m.speed.is_finite() {
@@ -552,6 +567,7 @@ mod tests {
             itr_count: 0,
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
         };
         p.update(5);
         assert!(p.itr_count > 0);
@@ -620,6 +636,7 @@ mod tests {
             }],
             performance_bindings: Vec::new(),
             tape_init: TapeInit::default(),
+            allow_diagonals: false,
         };
         assert!(validate_preset(&good).is_ok());
 
@@ -822,6 +839,7 @@ mod tests {
             }],
             performance_bindings: Vec::new(),
             tape_init: TapeInit::default(),
+            allow_diagonals: false,
         };
         assert!(validate_preset(&bad).is_err());
         bad.map_width = 512;
@@ -974,5 +992,62 @@ mod tests {
         assert_eq!(q.tape_init.seed, 77);
         assert_eq!(q.tape_init.perlin_scale, 16.0);
         assert_eq!(q.map, first);
+    }
+
+    #[test]
+    fn allow_diagonals_roundtrips_in_preset() {
+        let mut p = Program::new_random(2, 2);
+        p.set_allow_diagonals(true);
+        let preset = p.to_preset("diag").unwrap();
+        assert!(preset.allow_diagonals);
+        assert_eq!(preset.version, PRESET_VERSION);
+        let q = Program::from_preset(&preset).unwrap();
+        assert!(q.allow_diagonals);
+    }
+
+    #[test]
+    fn old_json_without_allow_diagonals_loads_false() {
+        let json = r#"{
+            "version": 5,
+            "name": "legacy diag",
+            "num_states": 1,
+            "num_symbols": 2,
+            "map_width": 512,
+            "map_height": 512,
+            "machines": [{"start_x": 0, "start_y": 0, "speed": 0.0, "table": [0, 1, 0, 0, 1, 0]}]
+        }"#;
+        let preset: Preset = serde_json::from_str(json).unwrap();
+        assert!(!preset.allow_diagonals);
+        let q = Program::from_preset(&preset).unwrap();
+        assert!(!q.allow_diagonals);
+    }
+
+    #[test]
+    fn reject_invalid_action_in_preset() {
+        let mut bad = Preset {
+            version: PRESET_VERSION,
+            name: "bad action".into(),
+            saved_at: 0,
+            num_states: 1,
+            num_symbols: 2,
+            map_width: DEFAULT_MAP_WIDTH,
+            map_height: DEFAULT_MAP_HEIGHT,
+            machines: vec![PresetMachine {
+                start_x: 0,
+                start_y: 0,
+                speed: 0.0,
+                active: true,
+                name: String::new(),
+                table: vec![0, 1, 8, 0, 1, 0],
+                num_states: 1,
+                palette: PaletteSpec::default(),
+            }],
+            performance_bindings: Vec::new(),
+            tape_init: TapeInit::default(),
+            allow_diagonals: true,
+        };
+        assert!(validate_preset(&bad).is_err());
+        bad.machines[0].table = vec![0, 1, 7, 0, 1, 0];
+        assert!(validate_preset(&bad).is_ok());
     }
 }

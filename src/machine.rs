@@ -19,7 +19,13 @@ pub const ACTION_LEFT: i32 = 0;
 pub const ACTION_RIGHT: i32 = 1;
 const ACTION_UP: i32 = 2;
 pub const ACTION_DOWN: i32 = 3;
+/// Diagonal: screen-space (+x right, +y down).
+pub const ACTION_UP_RIGHT: i32 = 4;
+pub const ACTION_UP_LEFT: i32 = 5;
+pub const ACTION_DOWN_RIGHT: i32 = 6;
+pub const ACTION_DOWN_LEFT: i32 = 7;
 const NUM_ACTIONS: i32 = 4;
+const NUM_ACTIONS_DIAGONAL: i32 = 8;
 
 pub const MIN_STATES: usize = 1;
 pub const MAX_STATES: usize = 32;
@@ -78,7 +84,13 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn new_random(num_states: usize, num_symbols: usize, width: usize, height: usize) -> Self {
+    pub fn new_random(
+        num_states: usize,
+        num_symbols: usize,
+        width: usize,
+        height: usize,
+        allow_diagonals: bool,
+    ) -> Self {
         assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
         assert!(validate_map_size(width, height).is_ok());
@@ -88,7 +100,8 @@ impl Machine {
 
         for st in 0..num_states {
             for sy in 0..num_symbols {
-                let (next_st, write_sy, action) = random_trans(&mut rng, num_states, num_symbols);
+                let (next_st, write_sy, action) =
+                    random_trans(&mut rng, num_states, num_symbols, allow_diagonals);
                 set_trans_raw(&mut table, num_states, st, sy, next_st, write_sy, action);
             }
         }
@@ -173,7 +186,7 @@ impl Machine {
 
     /// Re-randomize `percent` of `(state, symbol)` rules. Leaves start position,
     /// head, state, speed, name, and active unchanged.
-    pub fn mutate_table(&mut self, num_symbols: usize, percent: u8) {
+    pub fn mutate_table(&mut self, num_symbols: usize, percent: u8, allow_diagonals: bool) {
         let num_states = self.num_states;
         let n_rules = num_states * num_symbols;
         debug_assert_eq!(self.table.len(), n_rules * 3);
@@ -188,7 +201,8 @@ impl Machine {
         for &idx in indices.iter().take(count) {
             let st = idx % num_states;
             let sy = idx / num_states;
-            let (next_st, write_sy, action) = random_trans(&mut rng, num_states, num_symbols);
+            let (next_st, write_sy, action) =
+                random_trans(&mut rng, num_states, num_symbols, allow_diagonals);
             set_trans_raw(
                 &mut self.table,
                 num_states,
@@ -203,7 +217,12 @@ impl Machine {
 
     /// Resize the transition table to `num_states`, keeping rules that still fit
     /// (clamping `next_state`) and randomizing any new `(state, symbol)` cells.
-    pub fn resize_states(&mut self, num_states: usize, num_symbols: usize) {
+    pub fn resize_states(
+        &mut self,
+        num_states: usize,
+        num_symbols: usize,
+        allow_diagonals: bool,
+    ) {
         assert!(num_states >= MIN_STATES && num_states <= MAX_STATES);
         assert!(num_symbols >= MIN_SYMBOLS && num_symbols <= MAX_SYMBOLS);
         if num_states == self.num_states {
@@ -235,7 +254,8 @@ impl Machine {
                 );
             }
             for st in copy_states..num_states {
-                let (next_st, write_sy, action) = random_trans(&mut rng, num_states, num_symbols);
+                let (next_st, write_sy, action) =
+                    random_trans(&mut rng, num_states, num_symbols, allow_diagonals);
                 set_trans_raw(
                     &mut new_table,
                     num_states,
@@ -279,33 +299,19 @@ impl Machine {
         write_rgb(canvas, idx_map, self.palette.colors[write_sy as usize]);
 
         // Keep original action mapping (LEFT/RIGHT names are swapped vs motion)
-        match ac {
-            ACTION_LEFT => {
-                self.x_pos += 1;
-                if self.x_pos >= width {
-                    self.x_pos -= width;
-                }
-            }
-            ACTION_RIGHT => {
-                self.x_pos -= 1;
-                if self.x_pos < 0 {
-                    self.x_pos += width;
-                }
-            }
-            ACTION_UP => {
-                self.y_pos -= 1;
-                if self.y_pos < 0 {
-                    self.y_pos += height;
-                }
-            }
-            ACTION_DOWN => {
-                self.y_pos += 1;
-                if self.y_pos >= height {
-                    self.y_pos -= height;
-                }
-            }
+        let (dx, dy) = match ac {
+            ACTION_LEFT => (1, 0),
+            ACTION_RIGHT => (-1, 0),
+            ACTION_UP => (0, -1),
+            ACTION_DOWN => (0, 1),
+            ACTION_UP_RIGHT => (1, -1),
+            ACTION_UP_LEFT => (-1, -1),
+            ACTION_DOWN_RIGHT => (1, 1),
+            ACTION_DOWN_LEFT => (-1, 1),
             _ => panic!("invalid action: {ac}"),
-        }
+        };
+        self.x_pos = wrap_pos(self.x_pos + dx, width);
+        self.y_pos = wrap_pos(self.y_pos + dy, height);
         DirtyRect::from_cell(wrote_x, wrote_y)
     }
 
@@ -424,12 +430,27 @@ pub fn mutation_count(n_rules: usize, percent: u8) -> usize {
     (count as usize).clamp(1, n_rules)
 }
 
-fn random_trans<R: Rng>(rng: &mut R, num_states: usize, num_symbols: usize) -> (i32, i32, i32) {
+fn random_trans<R: Rng>(
+    rng: &mut R,
+    num_states: usize,
+    num_symbols: usize,
+    allow_diagonals: bool,
+) -> (i32, i32, i32) {
     let next_st = rng.random_range(0..num_states) as i32;
     // Never write symbol 0 (red = untouched), matching the original
     let write_sy = rng.random_range(1..num_symbols) as i32;
-    let action = rng.random_range(0..NUM_ACTIONS);
+    let n_actions = if allow_diagonals {
+        NUM_ACTIONS_DIAGONAL
+    } else {
+        NUM_ACTIONS
+    };
+    let action = rng.random_range(0..n_actions);
     (next_st, write_sy, action)
+}
+
+/// True if any action field in a flat transition table is a diagonal code (4–7).
+pub fn table_has_diagonal_actions(table: &[i32]) -> bool {
+    table.chunks_exact(3).any(|chunk| chunk[2] >= NUM_ACTIONS)
 }
 
 /// Relative step rate for a speed slider value.
@@ -477,5 +498,12 @@ mod tests {
         assert_eq!(mutation_count(0, 10), 0);
         assert_eq!(mutation_count(10, 50), 5);
         assert_eq!(mutation_count(15, 10), 2);
+    }
+
+    #[test]
+    fn table_has_diagonal_actions_detects_codes() {
+        assert!(!table_has_diagonal_actions(&[0, 1, 0, 0, 1, 3]));
+        assert!(table_has_diagonal_actions(&[0, 1, 4, 0, 1, 0]));
+        assert!(table_has_diagonal_actions(&[0, 1, 7]));
     }
 }

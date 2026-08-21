@@ -599,6 +599,8 @@ pub struct PanelDefaults {
     #[serde(default)]
     pub schedule_mode: ScheduleMode,
     #[serde(default)]
+    pub allow_diagonals: bool,
+    #[serde(default)]
     pub raster_mode: RasterMode,
     #[serde(default)]
     pub palette_kind: PaletteKind,
@@ -664,6 +666,7 @@ impl Default for PanelDefaults {
             refresh_hz: default_refresh_hz(),
             max_itrs: default_max_itrs(),
             schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: false,
             raster_mode: RasterMode::Gpu,
             palette_kind: PaletteKind::Classic,
             gradient_start: default_gradient_start(),

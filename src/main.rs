@@ -372,6 +372,7 @@ enum Message {
     MachineSpeedText(usize, String),
     ToggleMachineActive(usize, bool),
     ScheduleModeToggled(bool),
+    AllowDiagonalsToggled(bool),
     TogglePickStart(usize),
     CanvasClicked {
         x: f32,
@@ -435,6 +436,7 @@ enum Message {
     SettingsGaussianSigma(f32),
     SettingsPerlinScale(f32),
     SettingsPerlinOctaves(f32),
+    SettingsAllowDiagonals(bool),
 }
 
 impl App {
@@ -443,11 +445,12 @@ impl App {
         let defaults = settings.defaults.clone();
         let num_states = defaults.num_states;
         let num_symbols = defaults.num_symbols;
-        let mut program = Program::new_random_sized(
+        let mut program = Program::new_random_sized_with_diagonals(
             num_states,
             num_symbols,
             defaults.map_width,
             defaults.map_height,
+            defaults.allow_diagonals,
         );
         let mut palette = Palette::classic();
         let _ = palette.set_gradient_start_hex(defaults.gradient_start.clone(), num_symbols);
@@ -1277,6 +1280,10 @@ impl App {
                 self.persist_settings();
                 Task::none()
             }
+            Message::AllowDiagonalsToggled(allow) => {
+                self.program.set_allow_diagonals(allow);
+                Task::none()
+            }
             Message::ShareChanged(i, s) => {
                 if let Some(slot) = self.share_texts.get_mut(i) {
                     *slot = s;
@@ -1854,6 +1861,11 @@ impl App {
                 self.persist_settings();
                 Task::none()
             }
+            Message::SettingsAllowDiagonals(allow) => {
+                self.settings.defaults.allow_diagonals = allow;
+                self.persist_settings();
+                Task::none()
+            }
         }
     }
 
@@ -2357,6 +2369,10 @@ impl App {
                         BindTarget::global(Action::IncSymbols),
                     )),
                 ),
+            ),
+            inspector_row(
+                "Diagonals",
+                toggler(self.program.allow_diagonals).on_toggle(Message::AllowDiagonalsToggled),
             ),
             inspector_row(
                 "Size",
@@ -2991,6 +3007,10 @@ impl App {
                     Message::SettingsIncSymbols,
                     None,
                 ),
+            ),
+            inspector_row(
+                "Diagonals",
+                toggler(d.allow_diagonals).on_toggle(Message::SettingsAllowDiagonals),
             ),
             inspector_row(
                 "Size",
