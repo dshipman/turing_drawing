@@ -1,5 +1,7 @@
 //! Shared tape plus one or more machines that step on it in order.
 
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 
 use crate::dirty::DirtyRect;
@@ -51,6 +53,13 @@ pub fn remap_index_after_reorder(index: usize, from: usize, to: usize) -> usize 
     }
 }
 
+/// Named capture of every machine's speed slider, in list order.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpeedSnapshot {
+    pub name: String,
+    pub speeds: Vec<f32>,
+}
+
 /// The program: shared grid, shared alphabet size, and the machines that draw on it.
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -72,6 +81,10 @@ pub struct Program {
     pub schedule_mode: ScheduleMode,
     /// When true, Random / Mutate / Add machine may pick diagonal move actions.
     pub allow_diagonals: bool,
+    /// Named speed snapshots for the current machine list (session + presets).
+    pub speed_snapshots: Vec<SpeedSnapshot>,
+    /// Machine layout key paired with [`Self::speed_snapshots`]; not persisted.
+    pub(crate) speed_snapshot_key: u64,
 }
 
 impl Program {
@@ -124,9 +137,12 @@ impl Program {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
         prog.ensure_machine_ids();
         prog.reset();
+        prog.speed_snapshot_key = prog.machine_layout_key();
         prog
     }
 
@@ -152,9 +168,12 @@ impl Program {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
         prog.ensure_machine_ids();
         prog.reset();
+        prog.speed_snapshot_key = prog.machine_layout_key();
         Ok(prog)
     }
 
@@ -596,6 +615,105 @@ impl Program {
     pub fn machine_ids(&self) -> Vec<u64> {
         self.machines.iter().map(|m| m.id).collect()
     }
+
+    /// Key for speed-snapshot validity: machine count and list order (stable ids).
+    /// Canvas size and other program edits do not affect this key.
+    pub fn machine_layout_key(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.machines.len().hash(&mut hasher);
+        for m in &self.machines {
+            m.id.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn next_auto_snapshot_name(&self) -> String {
+        let mut n = 1u32;
+        loop {
+            let candidate = format!("Snapshot {n}");
+            if !self.speed_snapshots.iter().any(|s| s.name == candidate) {
+                return candidate;
+            }
+            n = n.saturating_add(1);
+            if n == 0 {
+                return format!("Snapshot {}", self.speed_snapshots.len() + 1);
+            }
+        }
+    }
+
+    /// Capture current machine speeds under `name` (empty → auto `Snapshot N`).
+    /// Returns the name that was stored. Overwrites an existing name.
+    pub fn store_speed_snapshot(&mut self, name: &str) -> Result<String, String> {
+        if self.machines.is_empty() {
+            return Err("program has no machines".into());
+        }
+        let name = {
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                self.next_auto_snapshot_name()
+            } else {
+                trimmed.to_string()
+            }
+        };
+        let speeds: Vec<f32> = self.machines.iter().map(|m| m.speed).collect();
+        if let Some(existing) = self.speed_snapshots.iter_mut().find(|s| s.name == name) {
+            existing.speeds = speeds;
+        } else {
+            self.speed_snapshots.push(SpeedSnapshot {
+                name: name.clone(),
+                speeds,
+            });
+        }
+        self.speed_snapshot_key = self.machine_layout_key();
+        Ok(name)
+    }
+
+    /// Apply a named snapshot's speeds. Does not reset the drawing.
+    pub fn recall_speed_snapshot(&mut self, name: &str) -> Result<(), String> {
+        let speeds = self
+            .speed_snapshots
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.speeds.clone())
+            .ok_or_else(|| format!("snapshot not found: {name}"))?;
+        if speeds.len() != self.machines.len() {
+            return Err(format!(
+                "snapshot \"{name}\" has {} speed(s), program has {}",
+                speeds.len(),
+                self.machines.len()
+            ));
+        }
+        for (i, speed) in speeds.into_iter().enumerate() {
+            self.set_machine_speed(i, speed)?;
+        }
+        Ok(())
+    }
+
+    /// Remove one named snapshot.
+    pub fn delete_speed_snapshot(&mut self, name: &str) -> Result<(), String> {
+        let before = self.speed_snapshots.len();
+        self.speed_snapshots.retain(|s| s.name != name);
+        if self.speed_snapshots.len() == before {
+            return Err(format!("snapshot not found: {name}"));
+        }
+        Ok(())
+    }
+
+    /// Clear snapshots if machines were added, removed, or reordered.
+    /// Returns `true` when a non-empty table was cleared.
+    pub fn sync_speed_snapshots(&mut self) -> bool {
+        if self.speed_snapshots.is_empty() {
+            return false;
+        }
+        let key = self.machine_layout_key();
+        if key != self.speed_snapshot_key {
+            self.speed_snapshots.clear();
+            self.speed_snapshot_key = key;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -647,6 +765,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         }
     }
 
@@ -916,6 +1036,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
 
         p.update(1);
@@ -1027,6 +1149,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
 
         p.update(10);
@@ -1062,6 +1186,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Normalised,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         }
     }
 
@@ -1130,6 +1256,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
 
         p.update(5);
@@ -1179,6 +1307,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
         p.update(1);
         assert_eq!(p.machines[0].x_pos, 0);
@@ -1502,6 +1632,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
         p.update(1);
         assert_eq!(p.map[0], 1);
@@ -1546,5 +1678,87 @@ mod tests {
         assert_eq!(p.machines[0].palette.colors, colors);
         assert_eq!(p.machines[0].num_states, 2);
         assert_eq!(p.num_symbols, 3);
+    }
+
+    #[test]
+    fn speed_snapshot_store_recall_overwrite_and_auto_name() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine(2);
+        p.set_machine_speed(0, 3.0).unwrap();
+        p.set_machine_speed(1, -2.0).unwrap();
+
+        let name = p.store_speed_snapshot("").unwrap();
+        assert_eq!(name, "Snapshot 1");
+        assert_eq!(p.speed_snapshots.len(), 1);
+
+        p.set_machine_speed(0, 0.0).unwrap();
+        p.set_machine_speed(1, 0.0).unwrap();
+        p.recall_speed_snapshot("Snapshot 1").unwrap();
+        assert_eq!(p.machines[0].speed, 3.0);
+        assert_eq!(p.machines[1].speed, -2.0);
+
+        p.set_machine_speed(0, 5.0).unwrap();
+        p.set_machine_speed(1, 1.0).unwrap();
+        let again = p.store_speed_snapshot("Snapshot 1").unwrap();
+        assert_eq!(again, "Snapshot 1");
+        assert_eq!(p.speed_snapshots.len(), 1);
+        assert_eq!(p.speed_snapshots[0].speeds, vec![5.0, 1.0]);
+
+        let second = p.store_speed_snapshot("").unwrap();
+        assert_eq!(second, "Snapshot 2");
+        assert_eq!(p.speed_snapshots.len(), 2);
+
+        p.delete_speed_snapshot("Snapshot 1").unwrap();
+        assert_eq!(p.speed_snapshots.len(), 1);
+        assert_eq!(p.speed_snapshots[0].name, "Snapshot 2");
+    }
+
+    #[test]
+    fn speed_snapshots_cleared_only_on_machine_count_or_order() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine(2);
+        p.store_speed_snapshot("A").unwrap();
+        assert!(!p.speed_snapshots.is_empty());
+
+        p.set_machine_speed(0, 4.0).unwrap();
+        assert!(!p.sync_speed_snapshots());
+        assert_eq!(p.speed_snapshots.len(), 1);
+
+        p.reset();
+        assert!(!p.sync_speed_snapshots());
+
+        p.reseed_tape();
+        assert!(!p.sync_speed_snapshots());
+
+        p.set_schedule_mode(ScheduleMode::Normalised);
+        assert!(!p.sync_speed_snapshots());
+
+        p.set_machine_active(0, false).unwrap();
+        assert!(!p.sync_speed_snapshots());
+
+        p.set_size(256, 256).unwrap();
+        assert!(!p.sync_speed_snapshots());
+
+        p.mutate_machine(0, 50).unwrap();
+        assert!(!p.sync_speed_snapshots());
+
+        p.set_machine_name(0, "Renamed".into()).unwrap();
+        assert!(!p.sync_speed_snapshots());
+
+        p.add_machine(2);
+        assert!(p.sync_speed_snapshots());
+        assert!(p.speed_snapshots.is_empty());
+
+        p.store_speed_snapshot("B").unwrap();
+        p.remove_machine(p.machines.len() - 1).unwrap();
+        assert!(p.sync_speed_snapshots());
+        assert!(p.speed_snapshots.is_empty());
+
+        p.add_machine(2);
+        p.store_speed_snapshot("C").unwrap();
+        assert_eq!(p.machines.len(), 3);
+        p.reorder_machines(0, 2).unwrap();
+        assert!(p.sync_speed_snapshots());
+        assert!(p.speed_snapshots.is_empty());
     }
 }

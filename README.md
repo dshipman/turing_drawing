@@ -7,9 +7,9 @@ Randomly generated 2D Turing machines draw generative art on a wrapping grid. Mu
 ## Requirements
 
 - Rust 1.88+ (iced 0.14)
-- A desktop environment (macOS, Linux, or Windows)
+- A desktop environment (macOS, Linux, or Windows), **or** a modern browser for the web build
 
-## Run
+## Run (desktop)
 
 ```bash
 cargo run --release
@@ -23,6 +23,28 @@ Headless CPU timings for saved presets and every resolution preset:
 cargo run --release --bin profile_presets
 ```
 
+## Run (web / WASM)
+
+Requires the wasm target and [Trunk](https://trunkrs.dev/):
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install --locked trunk
+```
+
+Serve a live rebuild in the browser (prefer release — debug WASM is much slower):
+
+```bash
+trunk serve --release
+```
+
+Produce a static site under `dist/` (serve that folder with any static HTTP server):
+
+```bash
+trunk build --release
+```
+
+Settings and presets persist in the browser's `localStorage`. Share encodings in the URL hash (e.g. `https://example.com/#3,3,0,0,...`) load on startup, matching the original web demo.
 ## Controls
 
 The window is a compact toolbar, a left machine pool, a centre drawing, a right panel (Canvas, Palette, Simulation), and a status bar. Those groups collapse from their headers. Selecting a machine opens its details below the machine list.
@@ -38,17 +60,18 @@ The window is a compact toolbar, a left machine pool, a centre drawing, a right 
 - **Speed** (global) — how hard the simulation runs each frame (`0` = paused, `1` = max, step `0.001`). This is a fraction of **Max itrs/frame**. Type a value beside the slider to set it exactly. In **Normalised** machine schedule mode, this budget is a fixed pool of machine-steps per frame rather than independent per-machine rates.
 - **Refresh rate** — target simulation ticks per second (default `60` Hz). Choose a preset (`30`, `60`, `120`, `144`, `165`, `240`) or type a custom integer (`1`–`240`). Each tick also stops if that frame's time budget is used up, so work cannot overrun the chosen period.
 - **Max itrs/frame** — cap on simulation rounds each tick at Speed `1` (default `350000`, range `1000`–`2000000`). Work also yields when the frame's time budget is spent.
-- **Raster** — how the baked RGBA canvas is shown. **GPU** (default) uploads the canvas texture directly; **CPU** copies the canvas to an image widget (fallback). Machine stepping always runs on the CPU. GPU mode needs iced's wgpu backend (the desktop default). If the drawing is blank, switch to CPU.
+- **Raster** — how the baked RGBA canvas is shown. **GPU** (default) uploads the canvas texture directly; **CPU** copies the canvas to an image widget (fallback). Machine stepping always runs on the CPU. GPU mode needs iced's wgpu backend (native Metal/Vulkan/DX12, or WebGPU/WebGL in the browser). If the drawing is blank, switch to CPU.
 - **Speed** (per machine) — how often that machine steps relative to the others. The slider is continuous from `−10` to `+10` (step `0.01`). `0` is the default rate (one step per round). Frequency is `10^(speed / 10)`, so `+10` is ten times more often and `−10` is ten times less often. Type a slider value beside the control to set it exactly; the `×` readout is the resulting step rate. Changing speed does not reset the drawing. With **Normalised** on, the same slider only changes that machine's share of the global Speed / Max itrs budget (readout shows `%`); speeding one machine up slows the others so the total stays fixed.
+- **Snapshots** — above the machine list, **Snapshots** opens an inline panel to store and recall named sets of every machine's speed. Empty names become `Snapshot 1`, `Snapshot 2`, …. Snapshots live in memory for the current program; they are written into a preset only when you **Store** while any exist, and are restored when that preset is loaded. Older preset files without snapshots load with none. The table is cleared only when machines are added, removed, or reordered; canvas size and other edits (speeds, Restart, Reseed, Random / Mutate, Active, names, palettes, etc.) leave it intact.
 - **Normalised** — toggle at the top of the machines list. Off (default) keeps absolute rates: each machine steps independently at `10^(speed / 10)` per round. On, active machines share one step of budget per round in proportion to those weights. The choice is remembered in Settings and is not saved in presets.
 - **Restart** — refill the grid from the current Init generator and send each head back to its start without changing rules. **Shift+R** does the same (rebindable in Settings). With Empty this is a blank canvas; with Uniform / Gaussian / Perlin it restores the same seeded pattern. **Reseed** (on the Canvas panel, or a rebindable shortcut) chooses a new seed and resets.
-- **Presets** — open the preset browser to **Store** the starting setup of all machines (shared symbol count, each machine's state count, canvas size, tape init kind/params/seed, diagonals flag, each machine's name, rules, start position, speed, palette, and list order) to disk, or **Load** / **Delete** a saved preset. Loading replaces the current machines and clears the drawing (same as Restart after swapping rules). **Performance bindings** (per-machine shortcuts set by right-clicking machine buttons) are saved and loaded with presets. Canvas palette, global Speed, Refresh rate, Max itrs/frame, Raster, and Normalised schedule mode are not saved. Older preset files without a canvas size load at `512 × 512`; older files without machine names get `Machine 1`, `Machine 2`, …; older files without tape init start Empty; older files without machine palettes use Classic; older files without per-machine state counts inherit the preset-level state count; older files without diagonals load with Diagonals off; older files without performance bindings start with none. Presets live in the app data folder (e.g. `~/Library/Application Support/turing_drawing/presets/` on macOS) as JSON; storing the same name overwrites. The list can be sorted by **Name** or **Date saved** (newest first; default).
+- **Presets** — open the preset browser to **Store** the starting setup of all machines (shared symbol count, each machine's state count, canvas size, tape init kind/params/seed, diagonals flag, each machine's name, rules, start position, speed, palette, list order, and any active speed snapshots) to disk, or **Load** / **Delete** a saved preset. Loading replaces the current machines and clears the drawing (same as Restart after swapping rules). **Performance bindings** (per-machine shortcuts set by right-clicking machine buttons) are saved and loaded with presets. Canvas palette, global Speed, Refresh rate, Max itrs/frame, Raster, and Normalised schedule mode are not saved. Older preset files without a canvas size load at `512 × 512`; older files without machine names get `Machine 1`, `Machine 2`, …; older files without tape init start Empty; older files without machine palettes use Classic; older files without per-machine state counts inherit the preset-level state count; older files without diagonals load with Diagonals off; older files without performance bindings start with none; older files without speed snapshots start with none. Presets live in the app data folder (e.g. `~/Library/Application Support/turing_drawing/presets/` on macOS) as JSON; storing the same name overwrites. The list can be sorted by **Name** or **Date saved** (newest first; default).
 - **Settings** — open a modal with **Defaults** and **Keybindings** tabs. Defaults are the startup values for the right-hand panel (**Default states** for new machines, symbols, diagonals, canvas size, tape init kind and params, canvas palette, speed, refresh rate, max itrs/frame, raster). The Normalised schedule toggle is also remembered here. The canvas palette is also cloned onto the first machine at launch. A fresh tape seed is chosen at launch. Changing those controls in the inspector only affects the current session (except Normalised, which writes through when toggled). **Global** keybindings (Restart, Reseed tape, Fullscreen, etc.) are rebindable from the Keybindings tab or by **right-clicking any non-machine button**; they are saved in `settings.json`. **Performance bindings** (Randomise, Mutate, Set start, Copy, Load, Remove for a specific machine) apply only to that machine, are cleared when it is removed, and are stored with presets when you **Store** (not in Settings). Right-click any button to set or clear its shortcut.
 - **Add machine** — append another random machine using Settings **Default states** (its palette starts as a copy of the canvas palette) and reset the drawing (button at the top of the machine list)
 - **Remove** — drop a machine (not the last one) and reset the drawing; available in that machine's inspector
 - **Fullscreen** / **F11** — toggle OS-level window fullscreen (F11 is the default binding; rebindable in Settings)
 - **Drawing** — fills the centre of the window and keeps the grid's aspect ratio (letterboxed if the window does not match). Double-click the drawing to show only the drawing; double-click again to restore the chrome. **Escape** closes the button shortcut dialog (without binding Escape), then cancels Settings keybinding capture, then closes Settings, then the preset browser, then the machine inspector, then the colour picker, then leaves drawing-only mode and exits fullscreen. After setting a shortcut in the button dialog, **Return** closes it.
-- **Machines** — the left pool lists each machine with an Active toggle, Speed slider, and Randomise. A **Normalised** toggle at the top of the list switches between absolute and shared-budget scheduling. Inactive machines do not step. With more than one machine, drag the `::` handle on a card to reorder the list (that order is also the simulation step order; reordering does not reset the drawing). Click a name or anywhere on the card to select it and show a Name field, States stepper, live state, position, palette, shareable encoding, Copy / Load / Remove below the list. Names default to `Machine N` and are kept when randomising or loading an encoding. Click the card again, press Escape, or click Close to deselect. Encoding format: `numStates,numSymbols,startX,startY,` then the flat transition table (names and palettes are not part of the encoding). Original `#hash` URLs (no start fields) load with start `(0,0)`. A leading `#` is stripped on load. With more than one machine, a loaded encoding must match the current symbol count; state counts may differ per machine.
+- **Machines** — the left pool lists each machine with an Active toggle, Speed slider, and Randomise. A **Normalised** toggle and **Snapshots** control sit above the list. Inactive machines do not step. With more than one machine, drag the `::` handle on a card to reorder the list (that order is also the simulation step order; reordering does not reset the drawing). Click a name or anywhere on the card to select it and show a Name field, States stepper, live state, position, palette, shareable encoding, Copy / Load / Remove below the list. Names default to `Machine N` and are kept when randomising or loading an encoding. Click the card again, press Escape, or click Close to deselect. Encoding format: `numStates,numSymbols,startX,startY,` then the flat transition table (names and palettes are not part of the encoding). Original `#hash` URLs (no start fields) load with start `(0,0)`. A leading `#` is stripped on load. With more than one machine, a loaded encoding must match the current symbol count; state counts may differ per machine.
 
 ## Credit
 

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Turing Drawings</title>
+    <base data-trunk-public-url />
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: #1a1a1a;
+            overflow: hidden;
+        }
+        #iced {
+            width: 100%;
+            height: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="iced"></div>
+    <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z" data-bin="turing_drawing" />
+</body>
+</html>

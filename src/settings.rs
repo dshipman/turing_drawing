@@ -1,7 +1,7 @@
 //! Persisted startup defaults and keybindings for the app.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 
 use iced::keyboard::{key, Key, Modifiers};
 use serde::{Deserialize, Serialize};
@@ -15,6 +15,7 @@ use crate::palette::{
     parse_hex_rgb, rgb_to_hex, PaletteKind, DEFAULT_GRADIENT_END, DEFAULT_GRADIENT_START,
 };
 use crate::program::ScheduleMode;
+use crate::storage;
 use crate::tape::{
     TapeInitKind, DEFAULT_GAUSSIAN_MEAN, DEFAULT_GAUSSIAN_SIGMA, DEFAULT_PERLIN_OCTAVES,
     DEFAULT_PERLIN_SCALE, MAX_GAUSSIAN_MEAN, MAX_GAUSSIAN_SIGMA, MAX_PERLIN_OCTAVES,
@@ -22,8 +23,6 @@ use crate::tape::{
 };
 
 const SETTINGS_VERSION: u32 = 1;
-const APP_DIR: &str = "turing_drawing";
-const SETTINGS_FILE: &str = "settings.json";
 
 pub const DEFAULT_REFRESH_HZ: u32 = 60;
 pub const MIN_REFRESH_HZ: u32 = 1;
@@ -32,15 +31,16 @@ pub const DEFAULT_MAX_ITRS: u64 = 350_000;
 pub const MIN_MAX_ITRS: u64 = 1_000;
 pub const MAX_MAX_ITRS: u64 = 2_000_000;
 
-/// App data folder (`…/turing_drawing`), shared with presets.
-pub fn app_data_dir() -> Result<PathBuf, String> {
-    let base =
-        dirs::data_dir().ok_or_else(|| "could not resolve app data directory".to_string())?;
-    Ok(base.join(APP_DIR))
+/// App data folder (`…/turing_drawing`), shared with presets. Native only.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn app_data_dir() -> Result<std::path::PathBuf, String> {
+    storage::app_data_dir()
 }
 
-pub fn settings_path() -> Result<PathBuf, String> {
-    Ok(app_data_dir()?.join(SETTINGS_FILE))
+/// Path to `settings.json` under the app data folder. Native only.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn settings_path() -> Result<std::path::PathBuf, String> {
+    storage::settings_path()
 }
 
 /// Rebindable commands. Machine/preset actions need an id or name on the binding.
@@ -759,17 +759,14 @@ impl Default for UserSettings {
 
 impl UserSettings {
     pub fn load() -> Self {
-        match settings_path() {
-            Ok(path) => Self::load_from(&path),
-            Err(_) => Self::default(),
+        match storage::read_settings_text() {
+            Ok(Some(text)) => Self::from_json(&text),
+            Ok(None) | Err(_) => Self::default(),
         }
     }
 
-    pub fn load_from(path: &Path) -> Self {
-        let Ok(text) = fs::read_to_string(path) else {
-            return Self::default();
-        };
-        match serde_json::from_str::<Self>(&text) {
+    fn from_json(text: &str) -> Self {
+        match serde_json::from_str::<Self>(text) {
             Ok(mut settings) => {
                 settings.sanitize();
                 settings
@@ -778,21 +775,27 @@ impl UserSettings {
         }
     }
 
-    pub fn save(&self) -> Result<(), String> {
-        let dir = app_data_dir()?;
-        fs::create_dir_all(&dir)
-            .map_err(|e| format!("could not create settings directory: {e}"))?;
-        self.save_to(&dir.join(SETTINGS_FILE))
+    /// Load settings from a filesystem path. Native only (used by tests).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_from(path: &Path) -> Self {
+        match storage::read_settings_from(path) {
+            Ok(Some(text)) => Self::from_json(&text),
+            Ok(None) | Err(_) => Self::default(),
+        }
     }
 
-    pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("could not create settings directory: {e}"))?;
-        }
+    pub fn save(&self) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("failed to serialize settings: {e}"))?;
-        fs::write(path, json).map_err(|e| format!("failed to write settings: {e}"))
+        storage::write_settings_text(&json)
+    }
+
+    /// Write settings to a filesystem path. Native only (used by tests).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("failed to serialize settings: {e}"))?;
+        storage::write_settings_to(path, &json)
     }
 
     pub fn sanitize(&mut self) {
@@ -848,6 +851,8 @@ impl UserSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

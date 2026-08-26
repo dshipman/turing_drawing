@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use iced::keyboard::key;
 use iced::widget::image::Handle;
@@ -10,6 +10,7 @@ use iced::{
     clipboard, event, keyboard, mouse, time, window, Alignment, Element, Event, Length, Point,
     Size, Subscription, Task, Theme,
 };
+use web_time::Instant;
 
 use turing_drawing::chrome;
 use turing_drawing::color_picker::{self, ColorPicker, ControlsMessage, GradientEndpoint};
@@ -182,6 +183,11 @@ fn parse_map_dim(text: &str, name: &str) -> Result<usize, String> {
 }
 
 fn main() -> iced::Result {
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+
+    atelier_ui::set_theme(atelier_ui::themes::graphite());
+
     iced::application(App::new, App::update, App::view)
         .title("Turing Drawings")
         .theme(theme)
@@ -192,6 +198,18 @@ fn main() -> iced::Result {
             ..Default::default()
         })
         .run()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn location_hash() -> Option<String> {
+    let window = web_sys::window()?;
+    let hash = window.location().hash().ok()?;
+    let trimmed = hash.trim();
+    if trimmed.is_empty() || trimmed == "#" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 fn theme(_app: &App) -> Theme {
@@ -277,6 +295,10 @@ struct App {
     preset_list: Vec<PresetInfo>,
     /// Order of the preset browser list.
     preset_sort: PresetSort,
+    /// Whether the inline speed-snapshot panel is open.
+    speed_snapshot_open: bool,
+    /// Draft name for storing a speed snapshot.
+    speed_snapshot_name: String,
     canvas_open: bool,
     palette_open: bool,
     simulation_open: bool,
@@ -437,6 +459,11 @@ enum Message {
     SettingsPerlinScale(f32),
     SettingsPerlinOctaves(f32),
     SettingsAllowDiagonals(bool),
+    ToggleSpeedSnapshots,
+    SpeedSnapshotNameChanged(String),
+    StoreSpeedSnapshot,
+    RecallSpeedSnapshot(String),
+    DeleteSpeedSnapshot(String),
 }
 
 impl App {
@@ -468,7 +495,31 @@ impl App {
             defaults.perlin_scale,
             defaults.perlin_octaves,
         ));
-        let share_texts = vec![program.machine_encoding(0)];
+        #[cfg(target_arch = "wasm32")]
+        let status = if let Some(hash) = location_hash() {
+            match Program::from_string(&hash) {
+                Ok(mut from_hash) => {
+                    from_hash.canvas_palette = palette.clone();
+                    for machine in &mut from_hash.machines {
+                        machine.palette = palette.clone();
+                    }
+                    from_hash.set_schedule_mode(defaults.schedule_mode);
+                    program = from_hash;
+                    "Loaded encoding from URL hash".into()
+                }
+                Err(e) => format!("Could not load URL hash: {e}"),
+            }
+        } else {
+            String::new()
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let status = String::new();
+        let num_symbols = program.num_symbols;
+        let map_width = program.width;
+        let map_height = program.height;
+        let share_texts = (0..program.machines.len())
+            .map(|i| program.machine_encoding(i))
+            .collect();
         let machine_speed_texts = program
             .machines
             .iter()
@@ -487,12 +538,12 @@ impl App {
                 speed_text: format_sim_speed(defaults.speed),
                 refresh_hz: defaults.refresh_hz,
                 refresh_hz_text: defaults.refresh_hz.to_string(),
-                map_width_text: defaults.map_width.to_string(),
-                map_height_text: defaults.map_height.to_string(),
+                map_width_text: map_width.to_string(),
+                map_height_text: map_height.to_string(),
                 max_itrs: defaults.max_itrs,
                 share_texts,
                 machine_speed_texts,
-                status: String::new(),
+                status,
                 pixels,
                 gpu_dirty: Some(init_dirty),
                 gpu_dirty_revision: init_revision,
@@ -510,6 +561,8 @@ impl App {
                 preset_name: String::new(),
                 preset_list: Vec::new(),
                 preset_sort: PresetSort::DateSaved,
+                speed_snapshot_open: false,
+                speed_snapshot_name: String::new(),
                 canvas_open: true,
                 palette_open: true,
                 simulation_open: true,
@@ -837,6 +890,14 @@ impl App {
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle_message(message);
+        if self.program.sync_speed_snapshots() {
+            self.status = "Snapshots cleared".into();
+        }
+        task
+    }
+
+    fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Tick => {
                 self.run_frame();
@@ -1866,6 +1927,46 @@ impl App {
                 self.persist_settings();
                 Task::none()
             }
+            Message::ToggleSpeedSnapshots => {
+                self.speed_snapshot_open = !self.speed_snapshot_open;
+                Task::none()
+            }
+            Message::SpeedSnapshotNameChanged(name) => {
+                self.speed_snapshot_name = name;
+                Task::none()
+            }
+            Message::StoreSpeedSnapshot => {
+                match self
+                    .program
+                    .store_speed_snapshot(&self.speed_snapshot_name)
+                {
+                    Ok(name) => {
+                        self.speed_snapshot_name.clear();
+                        self.status = format!("Stored snapshot \"{name}\"");
+                    }
+                    Err(e) => self.status = format!("Store snapshot failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::RecallSpeedSnapshot(name) => {
+                match self.program.recall_speed_snapshot(&name) {
+                    Ok(()) => {
+                        self.sync_machine_speed_texts();
+                        self.status = format!("Recalled snapshot \"{name}\"");
+                    }
+                    Err(e) => self.status = format!("Recall snapshot failed: {e}"),
+                }
+                Task::none()
+            }
+            Message::DeleteSpeedSnapshot(name) => {
+                match self.program.delete_speed_snapshot(&name) {
+                    Ok(()) => {
+                        self.status = format!("Deleted snapshot \"{name}\"");
+                    }
+                    Err(e) => self.status = format!("Delete snapshot failed: {e}"),
+                }
+                Task::none()
+            }
         }
     }
 
@@ -2296,6 +2397,7 @@ impl App {
             ]
             .align_y(Alignment::Center)
             .width(Length::Fill),
+            self.speed_snapshot_section(),
             chrome::hrule(),
             scrollable(list.padding(8))
                 .style(chrome::scrollable_style)
@@ -2317,6 +2419,100 @@ impl App {
             .height(Length::Fill)
             .style(chrome::panel)
             .into()
+    }
+
+    fn speed_snapshot_section(&self) -> Element<'_, Message> {
+        let count = self.program.speed_snapshots.len();
+        let heading = if count == 0 {
+            "Snapshots".to_string()
+        } else {
+            format!("Snapshots ({count})")
+        };
+        let toggle_label = if self.speed_snapshot_open {
+            "Hide"
+        } else {
+            "Show"
+        };
+        let toggle = if self.speed_snapshot_open {
+            chrome::accent_button(toggle_label)
+        } else {
+            chrome::compact_button(toggle_label)
+        }
+        .on_press(Message::ToggleSpeedSnapshots);
+
+        let mut section = column![row![
+            container(chrome::dim(heading)).padding(iced::Padding {
+                top: 0.0,
+                right: 0.0,
+                bottom: 4.0,
+                left: 10.0,
+            }),
+            Space::new().width(Length::Fill),
+            container(toggle).padding(iced::Padding {
+                top: 0.0,
+                right: 8.0,
+                bottom: 4.0,
+                left: 0.0,
+            }),
+        ]
+        .align_y(Alignment::Center)
+        .width(Length::Fill)]
+        .spacing(4);
+
+        if self.speed_snapshot_open {
+            let store_row = row![
+                chrome::field("Name", &self.speed_snapshot_name)
+                    .on_input(Message::SpeedSnapshotNameChanged)
+                    .width(Length::Fill),
+                chrome::compact_button("Store").on_press(Message::StoreSpeedSnapshot),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center);
+
+            section = section.push(
+                container(store_row).padding(iced::Padding {
+                    top: 0.0,
+                    right: 8.0,
+                    bottom: 0.0,
+                    left: 8.0,
+                }),
+            );
+
+            if self.program.speed_snapshots.is_empty() {
+                section = section.push(
+                    container(chrome::dim("No snapshots yet")).padding(iced::Padding {
+                        top: 0.0,
+                        right: 8.0,
+                        bottom: 4.0,
+                        left: 10.0,
+                    }),
+                );
+            } else {
+                let mut rows = column![].spacing(2);
+                for snap in &self.program.speed_snapshots {
+                    let name = snap.name.clone();
+                    rows = rows.push(
+                        row![
+                            chrome::compact_button(snap.name.as_str())
+                                .on_press(Message::RecallSpeedSnapshot(name.clone()))
+                                .width(Length::Fill),
+                            chrome::danger_button("×")
+                                .on_press(Message::DeleteSpeedSnapshot(name)),
+                        ]
+                        .spacing(4)
+                        .align_y(Alignment::Center),
+                    );
+                }
+                section = section.push(container(rows).padding(iced::Padding {
+                    top: 0.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                    left: 8.0,
+                }));
+            }
+        }
+
+        section.into()
     }
 
     fn inspector(&self) -> Element<'_, Message> {
@@ -3226,12 +3422,7 @@ fn bindable<'a>(
 }
 
 fn overlay_scrollable<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    scrollable(content)
-        .style(chrome::scrollable_style)
-        .spacing(4.0)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    atelier_ui::layout::themed_scrollable(content)
 }
 
 fn overlay_resize_grip(kind: OverlayKind) -> Element<'static, Message> {
@@ -3278,13 +3469,7 @@ fn inspector_row<'a>(
     label: &'a str,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    row![
-        chrome::label(label).width(chrome::LABEL_WIDTH),
-        content.into(),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .into()
+    atelier_ui::layout::inspector_row(label, content)
 }
 
 fn stepper(

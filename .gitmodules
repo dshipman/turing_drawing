@@ -1,0 +1,3 @@
+[submodule "external/atelier"]
+	path = external/atelier
+	url = /Users/s/dev/atelier

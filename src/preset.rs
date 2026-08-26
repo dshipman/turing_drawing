@@ -1,8 +1,7 @@
 //! Named on-disk presets for the full starting configuration of all machines.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,13 +11,13 @@ use crate::machine::{
     MIN_SYMBOLS,
 };
 use crate::palette::{empty_canvas, Palette, PaletteSpec};
-use crate::program::{Program, ScheduleMode};
+use crate::program::{Program, ScheduleMode, SpeedSnapshot};
 use crate::settings::PresetPerformanceBinding;
+use crate::storage;
 use crate::tape::TapeInit;
 
-const PRESET_VERSION: u32 = 6;
+const PRESET_VERSION: u32 = 7;
 const MIN_PRESET_VERSION: u32 = 1;
-const PRESETS_SUBDIR: &str = "presets";
 
 /// One machine's starting configuration inside a preset.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -79,6 +78,9 @@ pub struct Preset {
     /// When true, Random / Mutate may pick diagonal move actions. Missing → false.
     #[serde(default)]
     pub allow_diagonals: bool,
+    /// Named machine-speed snapshots. Missing in older files (empty).
+    #[serde(default)]
+    pub speed_snapshots: Vec<SpeedSnapshot>,
 }
 
 /// How the preset browser orders its list.
@@ -163,6 +165,7 @@ impl Program {
             performance_bindings: Vec::new(),
             tape_init: self.tape_init.clone(),
             allow_diagonals: self.allow_diagonals,
+            speed_snapshots: self.speed_snapshots.clone(),
         })
     }
 
@@ -211,6 +214,7 @@ impl Program {
             .first()
             .map(|m| m.palette.clone())
             .unwrap_or_else(Palette::classic);
+        let speed_snapshots = sanitize_speed_snapshots(&preset.speed_snapshots, machines.len());
         let mut prog = Self {
             num_symbols: preset.num_symbols,
             width,
@@ -225,9 +229,12 @@ impl Program {
             tape_init,
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: preset.allow_diagonals,
+            speed_snapshots,
+            speed_snapshot_key: 0,
         };
         prog.ensure_machine_ids();
         prog.reset();
+        prog.speed_snapshot_key = prog.machine_layout_key();
         Ok(prog)
     }
 }
@@ -313,6 +320,34 @@ fn validate_preset(preset: &Preset) -> Result<(), String> {
     Ok(())
 }
 
+/// Keep snapshots only when every row is well-formed for `machine_count`.
+/// If any row is invalid, drop the whole table.
+fn sanitize_speed_snapshots(snapshots: &[SpeedSnapshot], machine_count: usize) -> Vec<SpeedSnapshot> {
+    if snapshots.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(snapshots.len());
+    for s in snapshots {
+        let name = s.name.trim();
+        if name.is_empty() {
+            return Vec::new();
+        }
+        if s.speeds.len() != machine_count {
+            return Vec::new();
+        }
+        if !s.speeds.iter().all(|v| {
+            v.is_finite() && (MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED).contains(v)
+        }) {
+            return Vec::new();
+        }
+        out.push(SpeedSnapshot {
+            name: name.to_string(),
+            speeds: s.speeds.clone(),
+        });
+    }
+    out
+}
+
 fn default_map_width() -> usize {
     DEFAULT_MAP_WIDTH
 }
@@ -343,33 +378,19 @@ pub fn sanitize_filename(name: &str) -> Result<String, String> {
     Ok(safe)
 }
 
-/// Directory that holds preset JSON files.
+/// Directory that holds preset JSON files. Native only.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn presets_dir() -> Result<PathBuf, String> {
-    Ok(crate::settings::app_data_dir()?.join(PRESETS_SUBDIR))
+    storage::presets_dir()
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn ensure_presets_dir() -> Result<PathBuf, String> {
-    let dir = presets_dir()?;
-    fs::create_dir_all(&dir).map_err(|e| format!("could not create presets directory: {e}"))?;
-    Ok(dir)
-}
-
-fn preset_path(dir: &Path, name: &str) -> Result<PathBuf, String> {
-    let stem = sanitize_filename(name)?;
-    Ok(dir.join(format!("{stem}.json")))
+    storage::ensure_presets_dir()
 }
 
 fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-fn file_mtime_secs(path: &Path) -> Option<u64> {
-    let meta = fs::metadata(path).ok()?;
-    let modified = meta.modified().ok()?;
-    Some(modified.duration_since(UNIX_EPOCH).ok()?.as_secs())
+    storage::unix_now()
 }
 
 /// Format a unix timestamp as `YYYY-MM-DD HH:MM UTC` for the browser list.
@@ -399,65 +420,41 @@ fn utc_parts(secs: u64) -> (i32, u32, u32, u32, u32) {
     (year as i32, m, d, hour, minute)
 }
 
-/// Write (or overwrite) a preset to disk. Returns the display name stored.
+/// Write (or overwrite) a preset. Returns the display name stored.
 /// Stamps `saved_at` with the current time so date-saved sort stays accurate.
 pub fn save_preset(preset: &Preset) -> Result<String, String> {
     validate_preset(preset)?;
-    let dir = ensure_presets_dir()?;
-    let path = preset_path(&dir, &preset.name)?;
+    let stem = sanitize_filename(&preset.name)?;
     let mut to_write = preset.clone();
     to_write.saved_at = unix_now();
     let json = serde_json::to_string_pretty(&to_write)
         .map_err(|e| format!("failed to serialize preset: {e}"))?;
-    fs::write(&path, json).map_err(|e| format!("failed to write preset: {e}"))?;
+    storage::write_preset_text(&stem, &json)?;
     Ok(preset.name.clone())
 }
 
 /// Load a preset by display name (filename stem from sanitized name).
 pub fn load_preset(name: &str) -> Result<Preset, String> {
-    let dir = presets_dir()?;
-    let path = preset_path(&dir, name)?;
-    let text = fs::read_to_string(&path).map_err(|e| format!("failed to read preset: {e}"))?;
+    let stem = sanitize_filename(name)?;
+    let text = storage::read_preset_text(&stem)?;
     let preset: Preset =
         serde_json::from_str(&text).map_err(|e| format!("failed to parse preset: {e}"))?;
     validate_preset(&preset)?;
     Ok(preset)
 }
 
-/// Delete a preset file by display name.
+/// Delete a preset by display name.
 pub fn delete_preset(name: &str) -> Result<(), String> {
-    let dir = presets_dir()?;
-    let path = preset_path(&dir, name)?;
-    if !path.exists() {
-        return Err(format!("preset not found: {name}"));
-    }
-    fs::remove_file(&path).map_err(|e| format!("failed to delete preset: {e}"))?;
-    Ok(())
+    let stem = sanitize_filename(name)?;
+    storage::delete_preset_text(&stem)
 }
 
 /// List saved presets (unsorted). Skips unreadable or invalid files.
-/// Older files without `saved_at` fall back to the file's modification time.
+/// Older files without `saved_at` fall back to the file's modification time (native).
 pub fn list_presets() -> Result<Vec<PresetInfo>, String> {
-    let dir = match presets_dir() {
-        Ok(d) => d,
-        Err(e) => return Err(e),
-    };
-    if !dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let entries =
-        fs::read_dir(&dir).map_err(|e| format!("failed to list presets directory: {e}"))?;
-
+    let entries = storage::list_preset_entries()?;
     let mut infos = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(&path) else {
-            continue;
-        };
+    for (text, mtime) in entries {
         let Ok(preset) = serde_json::from_str::<Preset>(&text) else {
             continue;
         };
@@ -467,7 +464,7 @@ pub fn list_presets() -> Result<Vec<PresetInfo>, String> {
         let saved_at = if preset.saved_at > 0 {
             preset.saved_at
         } else {
-            file_mtime_secs(&path).unwrap_or(0)
+            mtime.unwrap_or(0)
         };
         let mut states_min = usize::MAX;
         let mut states_max = 0usize;
@@ -513,6 +510,7 @@ mod tests {
     use super::*;
     use crate::machine::{ACTION_DOWN, ACTION_LEFT};
     use crate::tape::{TapeInit, TapeInitKind};
+    use std::fs;
     use std::sync::Mutex;
 
     // Serialize filesystem tests that touch a shared temp-style path via env override
@@ -568,6 +566,8 @@ mod tests {
             tape_init: TapeInit::default(),
             schedule_mode: ScheduleMode::Absolute,
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
+            speed_snapshot_key: 0,
         };
         p.update(5);
         assert!(p.itr_count > 0);
@@ -637,6 +637,7 @@ mod tests {
             performance_bindings: Vec::new(),
             tape_init: TapeInit::default(),
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
         };
         assert!(validate_preset(&good).is_ok());
 
@@ -840,6 +841,7 @@ mod tests {
             performance_bindings: Vec::new(),
             tape_init: TapeInit::default(),
             allow_diagonals: false,
+            speed_snapshots: Vec::new(),
         };
         assert!(validate_preset(&bad).is_err());
         bad.map_width = 512;
@@ -1045,9 +1047,66 @@ mod tests {
             performance_bindings: Vec::new(),
             tape_init: TapeInit::default(),
             allow_diagonals: true,
+            speed_snapshots: Vec::new(),
         };
         assert!(validate_preset(&bad).is_err());
         bad.machines[0].table = vec![0, 1, 7, 0, 1, 0];
         assert!(validate_preset(&bad).is_ok());
+    }
+
+    #[test]
+    fn speed_snapshots_roundtrip_in_preset() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine(2);
+        p.set_machine_speed(0, 2.5).unwrap();
+        p.set_machine_speed(1, -1.5).unwrap();
+        p.store_speed_snapshot("Fast").unwrap();
+        p.set_machine_speed(0, -3.0).unwrap();
+        p.set_machine_speed(1, 4.0).unwrap();
+        p.store_speed_snapshot("Slow").unwrap();
+
+        let preset = p.to_preset("with snaps").unwrap();
+        assert_eq!(preset.version, PRESET_VERSION);
+        assert_eq!(preset.speed_snapshots.len(), 2);
+        assert_eq!(preset.speed_snapshots[0].name, "Fast");
+        assert_eq!(preset.speed_snapshots[0].speeds, vec![2.5, -1.5]);
+        assert_eq!(preset.speed_snapshots[1].name, "Slow");
+        assert_eq!(preset.speed_snapshots[1].speeds, vec![-3.0, 4.0]);
+
+        let mut q = Program::from_preset(&preset).unwrap();
+        assert_eq!(q.speed_snapshots, preset.speed_snapshots);
+        q.recall_speed_snapshot("Fast").unwrap();
+        assert_eq!(q.machines[0].speed, 2.5);
+        assert_eq!(q.machines[1].speed, -1.5);
+    }
+
+    #[test]
+    fn old_json_without_speed_snapshots_loads_empty() {
+        let json = r#"{
+            "version": 6,
+            "name": "legacy snaps",
+            "num_states": 1,
+            "num_symbols": 2,
+            "map_width": 512,
+            "map_height": 512,
+            "machines": [{"start_x": 0, "start_y": 0, "speed": 0.0, "table": [0, 1, 0, 0, 1, 0]}]
+        }"#;
+        let preset: Preset = serde_json::from_str(json).unwrap();
+        assert!(preset.speed_snapshots.is_empty());
+        let q = Program::from_preset(&preset).unwrap();
+        assert!(q.speed_snapshots.is_empty());
+    }
+
+    #[test]
+    fn malformed_speed_snapshots_are_dropped_on_load() {
+        let mut p = Program::new_random(2, 2);
+        p.add_machine(2);
+        let mut preset = p.to_preset("bad snaps").unwrap();
+        preset.speed_snapshots = vec![SpeedSnapshot {
+            name: "oops".into(),
+            speeds: vec![1.0], // wrong length
+        }];
+        let q = Program::from_preset(&preset).unwrap();
+        assert!(q.speed_snapshots.is_empty());
     }
 }
