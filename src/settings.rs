@@ -31,6 +31,39 @@ pub const DEFAULT_MAX_ITRS: u64 = 350_000;
 pub const MIN_MAX_ITRS: u64 = 1_000;
 pub const MAX_MAX_ITRS: u64 = 2_000_000;
 
+/// Built-in Atelier themes available in the settings interface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtelierTheme {
+    #[default]
+    Graphite,
+    Slate,
+    Paper,
+}
+
+impl AtelierTheme {
+    pub const ALL: [Self; 3] = [Self::Graphite, Self::Slate, Self::Paper];
+
+    pub fn activate(self) {
+        let theme = match self {
+            Self::Graphite => atelier_ui::themes::graphite(),
+            Self::Slate => atelier_ui::themes::slate(),
+            Self::Paper => atelier_ui::themes::paper(),
+        };
+        atelier_ui::set_theme(theme);
+    }
+}
+
+impl std::fmt::Display for AtelierTheme {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Graphite => "Graphite",
+            Self::Slate => "Slate",
+            Self::Paper => "Paper",
+        })
+    }
+}
+
 /// App data folder (`…/turing_drawing`), shared with presets. Native only.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn app_data_dir() -> Result<std::path::PathBuf, String> {
@@ -734,6 +767,8 @@ pub struct UserSettings {
     #[serde(default = "default_version")]
     pub version: u32,
     #[serde(default)]
+    pub theme: AtelierTheme,
+    #[serde(default)]
     pub defaults: PanelDefaults,
     #[serde(default = "default_keybindings")]
     pub keybindings: Vec<Keybinding>,
@@ -751,6 +786,7 @@ impl Default for UserSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
+            theme: AtelierTheme::default(),
             defaults: PanelDefaults::default(),
             keybindings: default_keybindings(),
         }
@@ -878,6 +914,7 @@ mod tests {
         let loaded: UserSettings = serde_json::from_str(r#"{"version": 1}"#).unwrap();
         let mut loaded = loaded;
         loaded.sanitize();
+        assert_eq!(loaded.theme, AtelierTheme::Graphite);
         assert_eq!(loaded.defaults, PanelDefaults::default());
         assert_eq!(loaded.keybindings, default_keybindings());
     }
@@ -989,11 +1026,13 @@ mod tests {
         let path = temp_path("roundtrip");
         let _ = fs::remove_file(&path);
         let mut settings = UserSettings::default();
+        settings.theme = AtelierTheme::Slate;
         settings.defaults.num_states = 8;
         settings.defaults.palette_kind = PaletteKind::Ocean;
         settings.save_to(&path).unwrap();
         let loaded = UserSettings::load_from(&path);
         let _ = fs::remove_file(&path);
+        assert_eq!(loaded.theme, AtelierTheme::Slate);
         assert_eq!(loaded.defaults.num_states, 8);
         assert_eq!(loaded.defaults.palette_kind, PaletteKind::Ocean);
         assert_eq!(

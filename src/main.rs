@@ -26,8 +26,8 @@ use turing_drawing::program::{
     MIN_SYMBOLS,
 };
 use turing_drawing::settings::{
-    self, Action, BindTarget, PerformanceBindings, UserSettings, DEFAULT_MAX_ITRS, MAX_MAX_ITRS,
-    MAX_REFRESH_HZ, MIN_MAX_ITRS, MIN_REFRESH_HZ,
+    self, Action, AtelierTheme, BindTarget, PerformanceBindings, UserSettings, DEFAULT_MAX_ITRS,
+    MAX_MAX_ITRS, MAX_REFRESH_HZ, MIN_MAX_ITRS, MIN_REFRESH_HZ,
 };
 use turing_drawing::tape::{
     TapeInit, TapeInitKind, DEFAULT_GAUSSIAN_MEAN, DEFAULT_GAUSSIAN_SIGMA, DEFAULT_PERLIN_OCTAVES,
@@ -186,8 +186,6 @@ fn main() -> iced::Result {
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
 
-    atelier_ui::set_theme(atelier_ui::themes::graphite());
-
     iced::application(App::new, App::update, App::view)
         .title("Turing Drawings")
         .theme(theme)
@@ -213,7 +211,11 @@ fn location_hash() -> Option<String> {
 }
 
 fn theme(_app: &App) -> Theme {
-    Theme::Dark
+    if atelier_ui::theme().name == "paper" {
+        Theme::Light
+    } else {
+        Theme::Dark
+    }
 }
 
 fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Message> {
@@ -437,6 +439,7 @@ enum Message {
     OpenButtonControls(BindTarget),
     CloseButtonControls,
     ClearBinding,
+    SettingsTheme(AtelierTheme),
     SettingsIncStates,
     SettingsDecStates,
     SettingsIncSymbols,
@@ -469,6 +472,7 @@ enum Message {
 impl App {
     fn new() -> (Self, Task<Message>) {
         let settings = UserSettings::load();
+        settings.theme.activate();
         let defaults = settings.defaults.clone();
         let num_states = defaults.num_states;
         let num_symbols = defaults.num_symbols;
@@ -1730,6 +1734,12 @@ impl App {
                 if tab != SettingsTab::Keybindings {
                     self.capturing_action = None;
                 }
+                Task::none()
+            }
+            Message::SettingsTheme(theme) => {
+                self.settings.theme = theme;
+                theme.activate();
+                self.persist_settings();
                 Task::none()
             }
             Message::CaptureBinding(target) => {
@@ -3185,6 +3195,19 @@ impl App {
         }
 
         column![
+            chrome::dim("APPEARANCE"),
+            inspector_row(
+                "Theme",
+                chrome::decorate_pick_list(
+                    pick_list(
+                        AtelierTheme::ALL,
+                        Some(self.settings.theme),
+                        Message::SettingsTheme,
+                    )
+                    .width(Length::Fill),
+                ),
+            ),
+            chrome::hrule(),
             chrome::dim("CANVAS"),
             inspector_row(
                 "Default states",
