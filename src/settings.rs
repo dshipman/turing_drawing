@@ -3,8 +3,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
+use atelier_ui::Appearance;
 use iced::keyboard::{key, Key, Modifiers};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::gpu_raster::RasterMode;
 use crate::machine::{
@@ -30,39 +31,6 @@ pub const MAX_REFRESH_HZ: u32 = 240;
 pub const DEFAULT_MAX_ITRS: u64 = 350_000;
 pub const MIN_MAX_ITRS: u64 = 1_000;
 pub const MAX_MAX_ITRS: u64 = 2_000_000;
-
-/// Built-in Atelier themes available in the settings interface.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AtelierTheme {
-    #[default]
-    Graphite,
-    Slate,
-    Paper,
-}
-
-impl AtelierTheme {
-    pub const ALL: [Self; 3] = [Self::Graphite, Self::Slate, Self::Paper];
-
-    pub fn activate(self) {
-        let theme = match self {
-            Self::Graphite => atelier_ui::themes::graphite(),
-            Self::Slate => atelier_ui::themes::slate(),
-            Self::Paper => atelier_ui::themes::paper(),
-        };
-        atelier_ui::set_theme(theme);
-    }
-}
-
-impl std::fmt::Display for AtelierTheme {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Graphite => "Graphite",
-            Self::Slate => "Slate",
-            Self::Paper => "Paper",
-        })
-    }
-}
 
 /// App data folder (`…/turing_drawing`), shared with presets. Native only.
 #[cfg(not(target_arch = "wasm32"))]
@@ -762,16 +730,75 @@ fn clamp_finite(value: f32, min: f32, max: f32, fallback: f32) -> f32 {
 }
 
 /// On-disk settings file.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UserSettings {
     #[serde(default = "default_version")]
     pub version: u32,
     #[serde(default)]
-    pub theme: AtelierTheme,
+    pub appearance: Appearance,
     #[serde(default)]
     pub defaults: PanelDefaults,
     #[serde(default = "default_keybindings")]
     pub keybindings: Vec<Keybinding>,
+}
+
+/// Legacy built-in theme enum persisted before appearance panes.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LegacyTheme {
+    Graphite,
+    Slate,
+    Paper,
+}
+
+impl LegacyTheme {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Graphite => "graphite",
+            Self::Slate => "slate",
+            Self::Paper => "paper",
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UserSettings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Raw {
+            #[serde(default = "default_version")]
+            version: u32,
+            #[serde(default)]
+            theme: Option<LegacyTheme>,
+            #[serde(default)]
+            appearance: Option<Appearance>,
+            #[serde(default)]
+            defaults: PanelDefaults,
+            #[serde(default = "default_keybindings")]
+            keybindings: Vec<Keybinding>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let appearance = raw.appearance.unwrap_or_else(|| {
+            appearance_from_legacy_theme(raw.theme.unwrap_or(LegacyTheme::Graphite))
+        });
+
+        Ok(Self {
+            version: raw.version,
+            appearance,
+            defaults: raw.defaults,
+            keybindings: raw.keybindings,
+        })
+    }
+}
+
+fn appearance_from_legacy_theme(legacy: LegacyTheme) -> Appearance {
+    let name = legacy.name();
+    let mut appearance = Appearance::default();
+    if let Some(theme) = atelier_ui::Theme::resolve(name) {
+        appearance.theme = theme;
+        appearance.save_as = name.into();
+    }
+    appearance
 }
 
 fn default_version() -> u32 {
@@ -786,7 +813,7 @@ impl Default for UserSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
-            theme: AtelierTheme::default(),
+            appearance: Appearance::default(),
             defaults: PanelDefaults::default(),
             keybindings: default_keybindings(),
         }
@@ -794,6 +821,11 @@ impl Default for UserSettings {
 }
 
 impl UserSettings {
+    /// Push the persisted appearance into the process-global Atelier theme.
+    pub fn apply_appearance(&self) {
+        self.appearance.apply();
+    }
+
     pub fn load() -> Self {
         match storage::read_settings_text() {
             Ok(Some(text)) => Self::from_json(&text),
@@ -898,11 +930,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_theme_field_migrates_to_appearance() {
+        let loaded: UserSettings =
+            serde_json::from_str(r#"{"version": 1, "theme": "slate"}"#).unwrap();
+        assert_eq!(loaded.appearance.theme.name, "slate");
+    }
+
+    #[test]
     fn default_json_roundtrip() {
         let original = UserSettings::default();
         let json = serde_json::to_string_pretty(&original).unwrap();
         let loaded: UserSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(loaded, original);
+        assert_eq!(loaded.version, original.version);
+        assert_eq!(loaded.appearance.theme.name, original.appearance.theme.name);
+        assert_eq!(loaded.appearance.save_as, original.appearance.save_as);
+        assert_eq!(loaded.defaults, original.defaults);
+        assert_eq!(loaded.keybindings, original.keybindings);
         assert!(json.contains("\"action\": \"restart\""));
         assert!(json.contains("\"key\": \"r\""));
         assert!(json.contains("\"shift\": true"));
@@ -914,7 +957,7 @@ mod tests {
         let loaded: UserSettings = serde_json::from_str(r#"{"version": 1}"#).unwrap();
         let mut loaded = loaded;
         loaded.sanitize();
-        assert_eq!(loaded.theme, AtelierTheme::Graphite);
+        assert_eq!(loaded.appearance.theme.name, "graphite");
         assert_eq!(loaded.defaults, PanelDefaults::default());
         assert_eq!(loaded.keybindings, default_keybindings());
     }
@@ -1026,13 +1069,14 @@ mod tests {
         let path = temp_path("roundtrip");
         let _ = fs::remove_file(&path);
         let mut settings = UserSettings::default();
-        settings.theme = AtelierTheme::Slate;
+        settings.appearance.theme = atelier_ui::themes::slate();
+        settings.appearance.save_as = "slate".into();
         settings.defaults.num_states = 8;
         settings.defaults.palette_kind = PaletteKind::Ocean;
         settings.save_to(&path).unwrap();
         let loaded = UserSettings::load_from(&path);
         let _ = fs::remove_file(&path);
-        assert_eq!(loaded.theme, AtelierTheme::Slate);
+        assert_eq!(loaded.appearance.theme.name, "slate");
         assert_eq!(loaded.defaults.num_states, 8);
         assert_eq!(loaded.defaults.palette_kind, PaletteKind::Ocean);
         assert_eq!(

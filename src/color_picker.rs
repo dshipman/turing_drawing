@@ -310,7 +310,7 @@ pub fn palette_controls<'a>(
         controls = controls
             .push(
                 row![
-                    chrome::label("Start").width(chrome::LABEL_WIDTH),
+                    chrome::label("Start").width(atelier_ui::theme().metrics.label_width),
                     clickable_color_swatch(
                         palette.gradient_start,
                         22.0,
@@ -326,7 +326,7 @@ pub fn palette_controls<'a>(
             )
             .push(
                 row![
-                    chrome::label("End").width(chrome::LABEL_WIDTH),
+                    chrome::label("End").width(atelier_ui::theme().metrics.label_width),
                     clickable_color_swatch(
                         palette.gradient_end,
                         22.0,
