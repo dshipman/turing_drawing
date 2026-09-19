@@ -242,10 +242,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "atelier-actions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.20",
+ "toml",
+]
+
+[[package]]
 name = "atelier-ui"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "atelier-actions",
  "directories",
  "iced",
  "iced_color_wheel",
