@@ -239,6 +239,142 @@ impl Program {
     }
 }
 
+/// Prefix for a whole-preset patch string (`td1.` + unpadded base64url JSON).
+///
+/// Safe to append after a URL `#`. A leading `#`, surrounding whitespace, or a
+/// full `https://…#td1.…` URL is accepted on load. Anything else is treated as
+/// a single-machine comma encoding.
+pub const SHARE_PREFIX: &str = "td1.";
+
+/// Name written into patch strings. Not shown as a saved preset.
+pub const SHARE_PRESET_NAME: &str = "shared";
+
+/// A parsed patch string: a whole preset, or a legacy one-machine encoding.
+#[derive(Debug, Clone)]
+pub enum LoadedShare {
+    Preset(Preset),
+    Legacy(Program),
+}
+
+/// Encode a validated preset as a URL-safe patch string.
+pub fn to_share_string(preset: &Preset) -> Result<String, String> {
+    validate_preset(preset)?;
+    let json = serde_json::to_vec(preset).map_err(|e| format!("failed to encode patch: {e}"))?;
+    Ok(format!("{SHARE_PREFIX}{}", base64url_encode(&json)))
+}
+
+/// Parse a patch string without applying it.
+///
+/// Accepts `td1.…` whole presets and the original single-machine encodings
+/// (optional leading `#`). Returns an error if the text is not a valid encoding.
+pub fn parse_share(s: &str) -> Result<LoadedShare, String> {
+    let s = normalize_share(s);
+    if s.is_empty() {
+        return Err("empty patch string".into());
+    }
+    if s.len() >= SHARE_PREFIX.len() && s[..SHARE_PREFIX.len()].eq_ignore_ascii_case(SHARE_PREFIX) {
+        let payload = &s[SHARE_PREFIX.len()..];
+        let preset = decode_preset_payload(payload)?;
+        return Ok(LoadedShare::Preset(preset));
+    }
+    match Program::from_string(&s) {
+        Ok(program) => Ok(LoadedShare::Legacy(program)),
+        Err(e) => Err(format!("invalid patch string: {e}")),
+    }
+}
+
+fn normalize_share(s: &str) -> String {
+    let trimmed = s.trim();
+    let body = match trimmed.rfind('#') {
+        Some(idx) => &trimmed[idx + 1..],
+        None => trimmed,
+    };
+    body.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+fn decode_preset_payload(payload: &str) -> Result<Preset, String> {
+    if payload.is_empty() {
+        return Err("invalid patch string: missing data after td1.".into());
+    }
+    let bytes = base64url_decode(payload).map_err(|e| format!("invalid patch string: {e}"))?;
+    let preset: Preset =
+        serde_json::from_slice(&bytes).map_err(|e| format!("invalid patch string: {e}"))?;
+    validate_preset(&preset).map_err(|e| format!("invalid patch string: {e}"))?;
+    Ok(preset)
+}
+
+fn base64url_encode(data: &[u8]) -> String {
+    const B64: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
+        out.push(B64[((n >> 18) & 63) as usize] as char);
+        out.push(B64[((n >> 12) & 63) as usize] as char);
+        out.push(B64[((n >> 6) & 63) as usize] as char);
+        out.push(B64[(n & 63) as usize] as char);
+        i += 3;
+    }
+    let rest = data.len() - i;
+    if rest == 1 {
+        let n = (data[i] as u32) << 16;
+        out.push(B64[((n >> 18) & 63) as usize] as char);
+        out.push(B64[((n >> 12) & 63) as usize] as char);
+    } else if rest == 2 {
+        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
+        out.push(B64[((n >> 18) & 63) as usize] as char);
+        out.push(B64[((n >> 12) & 63) as usize] as char);
+        out.push(B64[((n >> 6) & 63) as usize] as char);
+    }
+    out
+}
+
+fn base64url_decode(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.trim_end_matches('=');
+    if s.is_empty() {
+        return Err("missing data".into());
+    }
+    if !s.is_ascii() {
+        return Err("unexpected character".into());
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() % 4 == 1 {
+        return Err("truncated encoding".into());
+    }
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut i = 0;
+    while i < bytes.len() {
+        let take = (bytes.len() - i).min(4);
+        if take == 1 {
+            return Err("truncated encoding".into());
+        }
+        let mut vals = [0u8; 4];
+        for j in 0..take {
+            vals[j] = b64_val(bytes[i + j]).ok_or("unexpected character")?;
+        }
+        out.push((vals[0] << 2) | (vals[1] >> 4));
+        if take > 2 {
+            out.push((vals[1] << 4) | (vals[2] >> 2));
+        }
+        if take > 3 {
+            out.push((vals[2] << 6) | vals[3]);
+        }
+        i += take;
+    }
+    Ok(out)
+}
+
+fn b64_val(c: u8) -> Option<u8> {
+    match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'-' => Some(62),
+        b'_' => Some(63),
+        _ => None,
+    }
+}
+
 fn validate_preset(preset: &Preset) -> Result<(), String> {
     if preset.version < MIN_PRESET_VERSION || preset.version > PRESET_VERSION {
         return Err(format!(
@@ -322,7 +458,10 @@ fn validate_preset(preset: &Preset) -> Result<(), String> {
 
 /// Keep snapshots only when every row is well-formed for `machine_count`.
 /// If any row is invalid, drop the whole table.
-fn sanitize_speed_snapshots(snapshots: &[SpeedSnapshot], machine_count: usize) -> Vec<SpeedSnapshot> {
+fn sanitize_speed_snapshots(
+    snapshots: &[SpeedSnapshot],
+    machine_count: usize,
+) -> Vec<SpeedSnapshot> {
     if snapshots.is_empty() {
         return Vec::new();
     }
@@ -335,9 +474,11 @@ fn sanitize_speed_snapshots(snapshots: &[SpeedSnapshot], machine_count: usize) -
         if s.speeds.len() != machine_count {
             return Vec::new();
         }
-        if !s.speeds.iter().all(|v| {
-            v.is_finite() && (MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED).contains(v)
-        }) {
+        if !s
+            .speeds
+            .iter()
+            .all(|v| v.is_finite() && (MIN_MACHINE_SPEED..=MAX_MACHINE_SPEED).contains(v))
+        {
             return Vec::new();
         }
         out.push(SpeedSnapshot {
@@ -521,7 +662,13 @@ mod tests {
 
     static FS_LOCK: Mutex<()> = Mutex::new(());
 
-    fn fixed_machine(num_states: usize, table: Vec<i32>, start_x: i32, start_y: i32, speed: f32) -> Machine {
+    fn fixed_machine(
+        num_states: usize,
+        table: Vec<i32>,
+        start_x: i32,
+        start_y: i32,
+        speed: f32,
+    ) -> Machine {
         Machine {
             num_states,
             table,
@@ -1108,5 +1255,141 @@ mod tests {
         }];
         let q = Program::from_preset(&preset).unwrap();
         assert!(q.speed_snapshots.is_empty());
+    }
+
+    #[test]
+    fn base64url_roundtrip_lengths() {
+        assert_eq!(base64url_encode(&[]), "");
+        assert!(base64url_decode("").is_err());
+        for n in 1..=16 {
+            let data: Vec<u8> = (0..n).map(|i| (i * 17) as u8).collect();
+            let enc = base64url_encode(&data);
+            assert!(enc
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+            assert_eq!(base64url_decode(&enc).unwrap(), data);
+            let padded = format!("{enc}=");
+            assert_eq!(base64url_decode(&padded).unwrap(), data);
+        }
+        assert!(base64url_decode("abc$").is_err());
+        assert!(base64url_decode("a").is_err());
+    }
+
+    #[test]
+    fn share_string_roundtrips_whole_preset() {
+        let mut m0 = fixed_machine(1, vec![0, 1, ACTION_LEFT, 0, 1, ACTION_LEFT], 10, 20, 2.5);
+        m0.name = "Walker".into();
+        m0.active = false;
+        m0.palette.set_kind(crate::palette::PaletteKind::Ocean, 2);
+        let mut m1 = fixed_machine(
+            2,
+            vec![
+                0,
+                1,
+                ACTION_DOWN,
+                0,
+                1,
+                ACTION_DOWN,
+                0,
+                1,
+                ACTION_DOWN,
+                0,
+                1,
+                ACTION_DOWN,
+            ],
+            30,
+            40,
+            -1.0,
+        );
+        m1.name = "Other".into();
+        let mut p = Program {
+            num_symbols: 2,
+            width: 256,
+            height: 128,
+            map: vec![0; 256 * 128],
+            canvas: empty_canvas(256 * 128),
+            canvas_palette: Palette::classic(),
+            canvas_revision: 0,
+            canvas_dirty: None,
+            machines: vec![m0, m1],
+            itr_count: 0,
+            tape_init: TapeInit {
+                kind: TapeInitKind::Uniform,
+                seed: 99,
+                ..TapeInit::default()
+            },
+            schedule_mode: ScheduleMode::Absolute,
+            allow_diagonals: true,
+            speed_snapshots: vec![SpeedSnapshot {
+                name: "Fast".into(),
+                speeds: vec![2.5, -1.0],
+            }],
+            speed_snapshot_key: 0,
+        };
+        p.ensure_machine_ids();
+        let mut preset = p.to_preset(SHARE_PRESET_NAME).unwrap();
+        preset.performance_bindings = vec![crate::settings::PresetPerformanceBinding {
+            machine_index: 1,
+            action: crate::settings::Action::RandomizeMachine,
+            key: Some("q".into()),
+            named: None,
+            shift: true,
+            ctrl: false,
+            alt: false,
+            logo: false,
+        }];
+        let encoded = to_share_string(&preset).unwrap();
+        assert!(encoded.starts_with(SHARE_PREFIX));
+        assert!(encoded
+            .chars()
+            .all(|c| { c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' }));
+
+        let loaded = match parse_share(&format!("https://example.test/app/#{encoded}")).unwrap() {
+            LoadedShare::Preset(preset) => preset,
+            LoadedShare::Legacy(_) => panic!("expected a whole preset"),
+        };
+        assert_eq!(loaded, preset);
+
+        let q = Program::from_preset(&loaded).unwrap();
+        assert_eq!(q.machines.len(), 2);
+        assert_eq!(q.machines[0].name, "Walker");
+        assert!(!q.machines[0].active);
+        assert_eq!(q.machines[0].speed, 2.5);
+        assert_eq!(q.machines[1].num_states, 2);
+        assert_eq!(q.width, 256);
+        assert_eq!(q.height, 128);
+        assert!(q.allow_diagonals);
+        assert_eq!(q.tape_init.kind, TapeInitKind::Uniform);
+        assert_eq!(q.tape_init.seed, 99);
+        assert_eq!(q.speed_snapshots, preset.speed_snapshots);
+        assert_eq!(loaded.performance_bindings, preset.performance_bindings);
+    }
+
+    #[test]
+    fn parse_share_keeps_legacy_machine_encoding() {
+        let p = Program::new_random(2, 2);
+        let enc = p.machine_encoding(0);
+        match parse_share(&format!("# {enc}")).unwrap() {
+            LoadedShare::Legacy(q) => {
+                assert_eq!(q.machines.len(), 1);
+                assert_eq!(q.machines[0].table, p.machines[0].table);
+            }
+            LoadedShare::Preset(_) => panic!("expected a single-machine encoding"),
+        }
+    }
+
+    #[test]
+    fn parse_share_rejects_invalid_before_apply() {
+        assert!(parse_share("").is_err());
+        assert!(parse_share("#").is_err());
+        assert!(parse_share("td1.").is_err());
+        assert!(parse_share("td1.$$$$").is_err());
+        assert!(parse_share("not a patch").is_err());
+        let preset = Program::new_random(2, 2)
+            .to_preset(SHARE_PRESET_NAME)
+            .unwrap();
+        let mut bad = to_share_string(&preset).unwrap();
+        bad.push('!');
+        assert!(parse_share(&bad).is_err());
     }
 }

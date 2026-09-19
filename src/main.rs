@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use iced::keyboard::key;
 use iced::widget::image::Handle;
+use iced::widget::operation;
 use iced::widget::{
     center, column, container, mouse_area, opaque, pick_list, row, scrollable, slider, stack,
     toggler, Space,
@@ -56,6 +57,7 @@ const SETTINGS_OVERLAY_DEFAULT: Size = Size::new(840.0, 560.0);
 const SETTINGS_OVERLAY_MIN: Size = Size::new(700.0, 400.0);
 const PRESET_OVERLAY_DEFAULT: Size = Size::new(520.0, 460.0);
 const PRESET_OVERLAY_MIN: Size = Size::new(400.0, 240.0);
+const SHARE_STRING_INPUT_ID: &str = "share-string";
 const OVERLAY_WINDOW_MARGIN: f32 = 40.0;
 const SIM_SPEED_MIN: f32 = 0.0;
 const SIM_SPEED_MAX: f32 = 1.0;
@@ -212,6 +214,58 @@ fn location_hash() -> Option<String> {
     }
 }
 
+/// Apply a URL hash on startup. Whole-preset strings keep their palettes;
+/// legacy one-machine encodings take the launch palette.
+#[cfg(target_arch = "wasm32")]
+fn load_location_hash(
+    program: Program,
+    palette: &Palette,
+    schedule_mode: ScheduleMode,
+) -> (Program, PerformanceBindings, String) {
+    let Some(hash) = location_hash() else {
+        return (program, PerformanceBindings::default(), String::new());
+    };
+    match preset::parse_share(&hash) {
+        Ok(preset::LoadedShare::Preset(loaded)) => match Program::from_preset(&loaded) {
+            Ok(mut from_hash) => {
+                from_hash.set_schedule_mode(schedule_mode);
+                let n = from_hash.machines.len();
+                let perf = PerformanceBindings::from_preset_bindings(
+                    &loaded.performance_bindings,
+                    &from_hash.machine_ids(),
+                );
+                (
+                    from_hash,
+                    perf,
+                    format!("Loaded patch from URL ({n} machine(s))"),
+                )
+            }
+            Err(e) => (
+                program,
+                PerformanceBindings::default(),
+                format!("Could not load URL hash: {e}"),
+            ),
+        },
+        Ok(preset::LoadedShare::Legacy(mut from_hash)) => {
+            from_hash.canvas_palette = palette.clone();
+            for machine in &mut from_hash.machines {
+                machine.palette = palette.clone();
+            }
+            from_hash.set_schedule_mode(schedule_mode);
+            (
+                from_hash,
+                PerformanceBindings::default(),
+                "Loaded encoding from URL hash".into(),
+            )
+        }
+        Err(e) => (
+            program,
+            PerformanceBindings::default(),
+            format!("Could not load URL hash: {e}"),
+        ),
+    }
+}
+
 fn theme(app: &App) -> Theme {
     app.settings.appearance.iced_theme()
 }
@@ -220,26 +274,23 @@ fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Mess
     if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
         return Some(Message::PointerReleased);
     }
-    if status == event::Status::Captured {
+    let Event::Keyboard(keyboard::Event::KeyPressed {
+        key,
+        modifiers,
+        repeat,
+        ..
+    }) = event
+    else {
+        return None;
+    };
+    // Text fields capture Escape to unfocus. Dialogs still need it to cancel.
+    if matches!(key, keyboard::Key::Named(key::Named::Escape)) {
+        return Some(Message::Escape);
+    }
+    if status == event::Status::Captured || repeat {
         return None;
     }
-    match event {
-        Event::Keyboard(keyboard::Event::KeyPressed {
-            key,
-            modifiers,
-            repeat,
-            ..
-        }) => {
-            if repeat {
-                return None;
-            }
-            match &key {
-                keyboard::Key::Named(key::Named::Escape) => Some(Message::Escape),
-                _ => Some(Message::KeyPressed { key, modifiers }),
-            }
-        }
-        _ => None,
-    }
+    Some(Message::KeyPressed { key, modifiers })
 }
 
 struct App {
@@ -262,6 +313,12 @@ struct App {
     share_texts: Vec<String>,
     /// Draft text for each machine's speed field (parallel to `share_texts`).
     machine_speed_texts: Vec<String>,
+    /// Whole-preset load dialog.
+    share_string_open: bool,
+    /// Text the user is pasting into the load dialog.
+    share_string_draft: String,
+    /// Parse/load error shown inside the load dialog. Empty when valid.
+    share_string_error: String,
     status: String,
     /// Cached RGBA frame; rebuilt when the map changes.
     pixels: Vec<u8>,
@@ -432,6 +489,11 @@ enum Message {
     ShareChanged(usize, String),
     CopyShare(usize),
     LoadShare(usize),
+    CopyPatch,
+    OpenShareString,
+    CloseShareString,
+    ShareStringChanged(String),
+    SubmitShareString,
     ToggleDrawingOnly,
     ToggleFullscreen,
     PauseForModeSwitch,
@@ -530,22 +592,13 @@ impl App {
             defaults.perlin_octaves,
         ));
         #[cfg(target_arch = "wasm32")]
-        let status = if let Some(hash) = location_hash() {
-            match Program::from_string(&hash) {
-                Ok(mut from_hash) => {
-                    from_hash.canvas_palette = palette.clone();
-                    for machine in &mut from_hash.machines {
-                        machine.palette = palette.clone();
-                    }
-                    from_hash.set_schedule_mode(defaults.schedule_mode);
-                    program = from_hash;
-                    "Loaded encoding from URL hash".into()
-                }
-                Err(e) => format!("Could not load URL hash: {e}"),
-            }
-        } else {
-            String::new()
-        };
+        let (program, performance_bindings, status) = load_location_hash(
+            program,
+            &palette,
+            defaults.schedule_mode,
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let performance_bindings = PerformanceBindings::default();
         #[cfg(not(target_arch = "wasm32"))]
         let status = String::new();
         let num_symbols = program.num_symbols;
@@ -577,6 +630,9 @@ impl App {
                 max_itrs: defaults.max_itrs,
                 share_texts,
                 machine_speed_texts,
+                share_string_open: false,
+                share_string_draft: String::new(),
+                share_string_error: String::new(),
                 status,
                 pixels,
                 gpu_dirty: Some(init_dirty),
@@ -606,7 +662,7 @@ impl App {
                 picking_start: None,
                 suppress_drawing_only: false,
                 settings,
-                performance_bindings: PerformanceBindings::default(),
+                performance_bindings,
                 settings_open: false,
                 settings_section: SettingsSection::Defaults,
                 capturing_action: None,
@@ -892,6 +948,46 @@ impl App {
         self.status = label.to_string();
         self.prune_machine_bindings();
         self.refresh_frame();
+    }
+
+    fn patch_string(&self) -> Result<String, String> {
+        let mut preset = self.program.to_preset(preset::SHARE_PRESET_NAME)?;
+        preset.performance_bindings = self
+            .performance_bindings
+            .to_preset_bindings(&self.program.machine_ids());
+        preset::to_share_string(&preset)
+    }
+
+    /// Parse `text` first. On success, replace the session. On failure, leave it.
+    fn load_share_string(&mut self, text: &str) -> Result<String, String> {
+        match preset::parse_share(text)? {
+            preset::LoadedShare::Preset(loaded) => {
+                let program = Program::from_preset(&loaded)?;
+                let n = program.machines.len();
+                let perf = PerformanceBindings::from_preset_bindings(
+                    &loaded.performance_bindings,
+                    &program.machine_ids(),
+                );
+                self.apply_loaded_program(program, &format!("Loaded patch ({n} machine(s))"));
+                self.performance_bindings = perf;
+            }
+            preset::LoadedShare::Legacy(mut program) => {
+                let palette = self.program.canvas_palette.clone();
+                program.canvas_palette = palette.clone();
+                for machine in &mut program.machines {
+                    machine.palette = palette.clone();
+                }
+                let n = program.machines.len();
+                self.apply_loaded_program(program, &format!("Loaded patch ({n} machine(s))"));
+                self.performance_bindings = PerformanceBindings::default();
+            }
+        }
+        Ok(self.status.clone())
+    }
+
+    fn close_share_string(&mut self) {
+        self.share_string_open = false;
+        self.share_string_error.clear();
     }
 
     fn toggle_fullscreen() -> Task<Message> {
@@ -1418,6 +1514,51 @@ impl App {
                     }
                 }
             }
+            Message::CopyPatch => match self.patch_string() {
+                Ok(text) => {
+                    self.status = "Copied patch to clipboard".into();
+                    clipboard::write(text)
+                }
+                Err(e) => {
+                    self.status = format!("Copy failed: {e}");
+                    Task::none()
+                }
+            },
+            Message::OpenShareString => {
+                self.settings_open = false;
+                self.preset_browser_open = false;
+                self.button_controls = None;
+                self.capturing_action = None;
+                self.end_overlay_resize();
+                self.share_string_open = true;
+                self.share_string_draft.clear();
+                self.share_string_error.clear();
+                operation::focus(SHARE_STRING_INPUT_ID)
+            }
+            Message::CloseShareString => {
+                self.close_share_string();
+                Task::none()
+            }
+            Message::ShareStringChanged(text) => {
+                self.share_string_draft = text;
+                self.share_string_error.clear();
+                Task::none()
+            }
+            Message::SubmitShareString => {
+                let draft = self.share_string_draft.clone();
+                match self.load_share_string(&draft) {
+                    Ok(status) => {
+                        self.close_share_string();
+                        self.status = status;
+                    }
+                    Err(e) => {
+                        let message = format!("Load failed: {e}");
+                        self.share_string_error = message.clone();
+                        self.status = message;
+                    }
+                }
+                Task::none()
+            }
             Message::ToggleDrawingOnly => {
                 if self.suppress_drawing_only {
                     self.suppress_drawing_only = false;
@@ -1445,6 +1586,10 @@ impl App {
                 if self.button_controls.is_some() {
                     self.button_controls = None;
                     self.capturing_action = None;
+                    return Task::none();
+                }
+                if self.share_string_open {
+                    self.close_share_string();
                     return Task::none();
                 }
                 if self.capturing_action.is_some() {
@@ -1718,6 +1863,12 @@ impl App {
                 Task::none()
             }
             Message::KeyPressed { key, modifiers } => {
+                if self.share_string_open {
+                    if matches!(key, keyboard::Key::Named(key::Named::Enter)) {
+                        return self.update(Message::SubmitShareString);
+                    }
+                    return Task::none();
+                }
                 if let Some(target) = self.capturing_action.clone() {
                     if let Some(binding) =
                         settings::Keybinding::from_event(target.clone(), &key, modifiers)
@@ -2240,7 +2391,9 @@ impl App {
         .style(chrome::window);
 
         let mut layers = vec![content.into()];
-        if self.settings_open {
+        if self.share_string_open {
+            layers.push(self.share_string_overlay());
+        } else if self.settings_open {
             layers.push(self.settings_overlay());
         } else if self.preset_browser_open {
             layers.push(self.preset_browser());
@@ -2299,6 +2452,8 @@ impl App {
                     chrome::compact_button("Presets").on_press(Message::OpenPresetBrowser),
                     BindTarget::global(Action::OpenPresets),
                 ),
+                chrome::compact_button("Copy patch").on_press(Message::CopyPatch),
+                chrome::compact_button("Load from string").on_press(Message::OpenShareString),
                 bindable(
                     chrome::compact_button("Settings").on_press(Message::OpenSettings),
                     BindTarget::global(Action::OpenSettings),
@@ -3490,6 +3645,49 @@ impl App {
             mouse_area(center(opaque(panel)).style(chrome::scrim))
                 .on_press(Message::CloseButtonControls),
         )
+    }
+
+    fn share_string_overlay(&self) -> Element<'_, Message> {
+        let mut body = column![
+            row![
+                chrome::value("Load from string").size(16),
+                Space::new().width(Length::Fill),
+                chrome::compact_button("Cancel").on_press(Message::CloseShareString),
+            ]
+            .align_y(Alignment::Center),
+            chrome::dim(
+                "Paste a patch string (td1.…) or a single-machine encoding. Enter loads; Escape cancels.",
+            )
+            .width(Length::Fill),
+            chrome::field("td1.…", &self.share_string_draft)
+                .id(SHARE_STRING_INPUT_ID)
+                .on_input(Message::ShareStringChanged)
+                .on_submit(Message::SubmitShareString)
+                .width(Length::Fill),
+        ]
+        .spacing(10)
+        .width(Length::Fill);
+
+        if !self.share_string_error.is_empty() {
+            body = body.push(
+                chrome::danger_text(self.share_string_error.as_str()).width(Length::Fill),
+            );
+        }
+
+        body = body.push(
+            row![
+                Space::new().width(Length::Fill),
+                chrome::accent_button("Load").on_press(Message::SubmitShareString),
+            ]
+            .align_y(Alignment::Center),
+        );
+
+        let panel = container(body)
+            .padding(16)
+            .width(560)
+            .style(chrome::overlay_panel);
+
+        opaque(mouse_area(center(opaque(panel)).style(chrome::scrim)))
     }
 }
 
