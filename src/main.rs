@@ -12,6 +12,8 @@ use iced::{
 };
 use web_time::Instant;
 
+use atelier_ui::appearance::{self, AppearanceEvent};
+use atelier_ui::layout::{self, NavGroup, NavItem};
 use turing_drawing::chrome;
 use turing_drawing::color_picker::{self, ColorPicker, ControlsMessage, GradientEndpoint};
 use turing_drawing::dirty::DirtyRect;
@@ -26,8 +28,8 @@ use turing_drawing::program::{
     MIN_SYMBOLS,
 };
 use turing_drawing::settings::{
-    self, Action, BindTarget, PerformanceBindings, UserSettings, DEFAULT_MAX_ITRS, MAX_MAX_ITRS,
-    MAX_REFRESH_HZ, MIN_MAX_ITRS, MIN_REFRESH_HZ,
+    self, Action, BindTarget, PerformanceBindings, UserSettings, DEFAULT_MAX_ITRS,
+    MAX_MAX_ITRS, MAX_REFRESH_HZ, MIN_MAX_ITRS, MIN_REFRESH_HZ,
 };
 use turing_drawing::tape::{
     TapeInit, TapeInitKind, DEFAULT_GAUSSIAN_MEAN, DEFAULT_GAUSSIAN_SIGMA, DEFAULT_PERLIN_OCTAVES,
@@ -50,8 +52,8 @@ const MODE_SWITCH_SETTLE: Duration = Duration::from_millis(100);
 const MODE_SWITCH_PAUSE_MAX: Duration = Duration::from_millis(800);
 const WINDOW_DEFAULT: Size = Size::new(1100.0, 720.0);
 const WINDOW_MIN: Size = Size::new(900.0, 560.0);
-const SETTINGS_OVERLAY_DEFAULT: Size = Size::new(560.0, 490.0);
-const SETTINGS_OVERLAY_MIN: Size = Size::new(480.0, 280.0);
+const SETTINGS_OVERLAY_DEFAULT: Size = Size::new(840.0, 560.0);
+const SETTINGS_OVERLAY_MIN: Size = Size::new(700.0, 400.0);
 const PRESET_OVERLAY_DEFAULT: Size = Size::new(520.0, 460.0);
 const PRESET_OVERLAY_MIN: Size = Size::new(400.0, 240.0);
 const OVERLAY_WINDOW_MARGIN: f32 = 40.0;
@@ -186,8 +188,6 @@ fn main() -> iced::Result {
     #[cfg(target_arch = "wasm32")]
     console_error_panic_hook::set_once();
 
-    atelier_ui::set_theme(atelier_ui::themes::graphite());
-
     iced::application(App::new, App::update, App::view)
         .title("Turing Drawings")
         .theme(theme)
@@ -212,8 +212,8 @@ fn location_hash() -> Option<String> {
     }
 }
 
-fn theme(_app: &App) -> Theme {
-    Theme::Dark
+fn theme(app: &App) -> Theme {
+    app.settings.appearance.iced_theme()
 }
 
 fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Message> {
@@ -315,7 +315,7 @@ struct App {
     settings: UserSettings,
     performance_bindings: PerformanceBindings,
     settings_open: bool,
-    settings_tab: SettingsTab,
+    settings_section: SettingsSection,
     capturing_action: Option<BindTarget>,
     button_controls: Option<BindTarget>,
     settings_width_text: String,
@@ -334,9 +334,36 @@ enum InspectorGroup {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SettingsTab {
+enum SettingsSection {
+    AppearanceTheme,
+    AppearanceColors,
+    AppearanceLayout,
+    AppearanceStyles,
     Defaults,
     Keybindings,
+}
+
+impl SettingsSection {
+    fn category(self) -> &'static str {
+        match self {
+            Self::AppearanceTheme
+            | Self::AppearanceColors
+            | Self::AppearanceLayout
+            | Self::AppearanceStyles => "Appearance",
+            Self::Defaults | Self::Keybindings => "App",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::AppearanceTheme => "Theme",
+            Self::AppearanceColors => "Colours",
+            Self::AppearanceLayout => "Layout",
+            Self::AppearanceStyles => "Styles",
+            Self::Defaults => "Defaults",
+            Self::Keybindings => "Keybindings",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -432,7 +459,8 @@ enum Message {
     },
     OpenSettings,
     CloseSettings,
-    SettingsTab(SettingsTab),
+    SettingsSection(SettingsSection),
+    SettingsAppearance(AppearanceEvent),
     CaptureBinding(BindTarget),
     OpenButtonControls(BindTarget),
     CloseButtonControls,
@@ -469,6 +497,12 @@ enum Message {
 impl App {
     fn new() -> (Self, Task<Message>) {
         let settings = UserSettings::load();
+        settings.apply_appearance();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = atelier_ui::ensure_themes_dir();
+            let _ = atelier_ui::rescan_themes();
+        }
         let defaults = settings.defaults.clone();
         let num_states = defaults.num_states;
         let num_symbols = defaults.num_symbols;
@@ -574,7 +608,7 @@ impl App {
                 settings,
                 performance_bindings: PerformanceBindings::default(),
                 settings_open: false,
-                settings_tab: SettingsTab::Defaults,
+                settings_section: SettingsSection::Defaults,
                 capturing_action: None,
                 button_controls: None,
                 settings_width_text: defaults.map_width.to_string(),
@@ -804,9 +838,11 @@ impl App {
                 self.machine_color_picker.close();
                 Task::none()
             }
-            Action::SettingsTabDefaults => self.update(Message::SettingsTab(SettingsTab::Defaults)),
+            Action::SettingsTabDefaults => {
+                self.update(Message::SettingsSection(SettingsSection::Defaults))
+            }
             Action::SettingsTabKeybindings => {
-                self.update(Message::SettingsTab(SettingsTab::Keybindings))
+                self.update(Message::SettingsSection(SettingsSection::Keybindings))
             }
             _ => Task::none(),
         }
@@ -1725,11 +1761,17 @@ impl App {
                 self.end_overlay_resize();
                 Task::none()
             }
-            Message::SettingsTab(tab) => {
-                self.settings_tab = tab;
-                if tab != SettingsTab::Keybindings {
+            Message::SettingsSection(section) => {
+                self.settings_section = section;
+                if section != SettingsSection::Keybindings {
                     self.capturing_action = None;
                 }
+                Task::none()
+            }
+            Message::SettingsAppearance(event) => {
+                self.settings.appearance.update(event);
+                self.settings.appearance.apply();
+                self.persist_settings();
                 Task::none()
             }
             Message::CaptureBinding(target) => {
@@ -3009,35 +3051,75 @@ impl App {
         )
     }
 
-    fn settings_overlay(&self) -> Element<'_, Message> {
-        let defaults_tab = bindable(
-            if self.settings_tab == SettingsTab::Defaults {
-                chrome::accent_button("Defaults")
-            } else {
-                chrome::compact_button("Defaults")
-            }
-            .on_press(Message::SettingsTab(SettingsTab::Defaults)),
-            BindTarget::global(Action::SettingsTabDefaults),
-        );
-        let keys_tab = bindable(
-            if self.settings_tab == SettingsTab::Keybindings {
-                chrome::accent_button("Keybindings")
-            } else {
-                chrome::compact_button("Keybindings")
-            }
-            .on_press(Message::SettingsTab(SettingsTab::Keybindings)),
-            BindTarget::global(Action::SettingsTabKeybindings),
-        );
+    fn settings_pane(&self) -> Element<'_, Message> {
+        match self.settings_section {
+            SettingsSection::AppearanceTheme => appearance::theme_pane(&self.settings.appearance)
+                .map(Message::SettingsAppearance),
+            SettingsSection::AppearanceColors => appearance::colors_pane(&self.settings.appearance)
+                .map(Message::SettingsAppearance),
+            SettingsSection::AppearanceLayout => appearance::layout_pane(&self.settings.appearance)
+                .map(Message::SettingsAppearance),
+            SettingsSection::AppearanceStyles => appearance::styles_pane(&self.settings.appearance)
+                .map(Message::SettingsAppearance),
+            SettingsSection::Defaults => overlay_scrollable(self.settings_defaults_tab()),
+            SettingsSection::Keybindings => overlay_scrollable(self.settings_keybindings_tab()),
+        }
+    }
 
-        let body: Element<'_, Message> = match self.settings_tab {
-            SettingsTab::Defaults => self.settings_defaults_tab(),
-            SettingsTab::Keybindings => self.settings_keybindings_tab(),
-        };
+    fn settings_overlay(&self) -> Element<'_, Message> {
+        let section = self.settings_section;
+        let breadcrumb = format!("{} · {}", section.category(), section.label());
+        let groups = vec![
+            NavGroup {
+                title: "Appearance",
+                items: vec![
+                    NavItem {
+                        id: SettingsSection::AppearanceTheme,
+                        label: "Theme",
+                    },
+                    NavItem {
+                        id: SettingsSection::AppearanceColors,
+                        label: "Colours",
+                    },
+                    NavItem {
+                        id: SettingsSection::AppearanceLayout,
+                        label: "Layout",
+                    },
+                    NavItem {
+                        id: SettingsSection::AppearanceStyles,
+                        label: "Styles",
+                    },
+                ],
+                empty_hint: None,
+            },
+            NavGroup {
+                title: "App",
+                items: vec![
+                    NavItem {
+                        id: SettingsSection::Defaults,
+                        label: "Defaults",
+                    },
+                    NavItem {
+                        id: SettingsSection::Keybindings,
+                        label: "Keybindings",
+                    },
+                ],
+                empty_hint: None,
+            },
+        ];
+
+        let body = layout::settings_window(
+            "Settings",
+            Some(breadcrumb),
+            groups,
+            &section,
+            Message::SettingsSection,
+            self.settings_pane(),
+        );
 
         let panel = container(
             column![
                 row![
-                    chrome::value("Settings").size(16),
                     Space::new().width(Length::Fill),
                     bindable(
                         chrome::compact_button("Close").on_press(Message::CloseSettings),
@@ -3045,13 +3127,12 @@ impl App {
                     ),
                 ]
                 .align_y(Alignment::Center),
-                row![defaults_tab, keys_tab]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                overlay_scrollable(body),
+                container(body)
+                    .width(Length::Fill)
+                    .height(Length::Fill),
                 overlay_resize_grip(OverlayKind::Settings),
             ]
-            .spacing(10)
+            .spacing(8)
             .height(Length::Fill),
         )
         .padding(16)
