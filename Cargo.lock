@@ -3276,9 +3276,12 @@ dependencies = [
  "getrandom 0.3.4",
  "iced",
  "iced_color_wheel",
+ "js-sys",
  "rand",
  "serde",
  "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "web-time",
 ]

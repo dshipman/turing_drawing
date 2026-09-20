@@ -8,9 +8,11 @@ use iced::widget::{
     toggler, Space,
 };
 use iced::{
-    clipboard, event, keyboard, mouse, time, window, Alignment, Element, Event, Length, Point,
-    Size, Subscription, Task, Theme,
+    event, keyboard, mouse, time, window, Alignment, Element, Event, Length, Point, Size,
+    Subscription, Task, Theme,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use iced::clipboard;
 use web_time::Instant;
 
 use atelier_ui::appearance::{self, AppearanceEvent};
@@ -214,6 +216,228 @@ fn location_hash() -> Option<String> {
     }
 }
 
+/// Write text to the clipboard. On native this uses iced; on wasm iced's
+/// backend is a no-op, so we call the browser Clipboard API instead.
+fn write_clipboard(text: String) -> Result<Task<Message>, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Ok(clipboard::write(text))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        copy_text_web(&text)?;
+        Ok(Task::none())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn copy_text_web(text: &str) -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    if let Some(clipboard) = web_clipboard(&window) {
+        // Invoke writeText during the click gesture; await the promise later.
+        let promise = clipboard.write_text(text);
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+        });
+        return Ok(());
+    }
+    copy_text_web_exec_command(text)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_clipboard(window: &web_sys::Window) -> Option<web_sys::Clipboard> {
+    use wasm_bindgen::JsCast;
+    let navigator = window.navigator();
+    let value = js_sys::Reflect::get(&navigator, &wasm_bindgen::JsValue::from_str("clipboard")).ok()?;
+    if value.is_undefined() || value.is_null() {
+        return None;
+    }
+    value.dyn_into::<web_sys::Clipboard>().ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn copy_text_web_exec_command(text: &str) -> Result<(), String> {
+    use wasm_bindgen::JsCast;
+
+    let window = web_sys::window().ok_or_else(|| "no window".to_string())?;
+    let document = window.document().ok_or_else(|| "no document".to_string())?;
+    let html_document: web_sys::HtmlDocument = document
+        .dyn_into()
+        .map_err(|_| "document cast failed".to_string())?;
+    let body = html_document
+        .body()
+        .ok_or_else(|| "no body".to_string())?;
+    let element = html_document
+        .create_element("textarea")
+        .map_err(|_| "could not create textarea".to_string())?;
+    let textarea: web_sys::HtmlTextAreaElement = element
+        .dyn_into()
+        .map_err(|_| "textarea cast failed".to_string())?;
+    textarea.set_value(text);
+    let _ = textarea.set_attribute("readonly", "");
+    let style = textarea.style();
+    let _ = style.set_property("position", "fixed");
+    let _ = style.set_property("left", "-9999px");
+    body.append_child(&textarea)
+        .map_err(|_| "could not attach textarea".to_string())?;
+    textarea.select();
+    let _ = textarea.set_selection_range(0, text.len() as u32);
+    let ok = html_document
+        .exec_command("copy")
+        .map_err(|_| "clipboard copy was denied".to_string())?;
+    let _ = body.remove_child(&textarea);
+    if ok {
+        Ok(())
+    } else {
+        Err("clipboard copy was denied".into())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn clipboard_read_task() -> Option<Task<Message>> {
+    let window = web_sys::window()?;
+    let clipboard = web_clipboard(&window)?;
+    // Call readText during the key gesture; the promise is awaited afterwards.
+    let promise = clipboard.read_text();
+    Some(Task::perform(
+        async move {
+            wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .ok()
+                .and_then(|value| value.as_string())
+                .filter(|text| !text.is_empty())
+        },
+        Message::WebPaste,
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_paste_subscription() -> Subscription<Message> {
+    Subscription::run(web_paste_stream)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn web_paste_stream() -> impl iced::futures::Stream<Item = Message> {
+    iced::stream::channel(8, async |sender| {
+        install_paste_listener(sender);
+        std::future::pending::<()>().await;
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn install_paste_listener(mut sender: iced::futures::channel::mpsc::Sender<Message>) {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Some(textarea) = hidden_paste_target(&document) else {
+        return;
+    };
+
+    // Winit calls preventDefault on canvas keydown, which cancels the browser
+    // paste event. Catch the shortcut in the capture phase, focus an editable
+    // element, and stop the event before the canvas sees it.
+    let textarea_key = textarea.clone();
+    let key_closure = Closure::wrap(Box::new(move |event: web_sys::KeyboardEvent| {
+        if !share_paste_armed() || !is_dom_paste_shortcut(&event) {
+            return;
+        }
+        textarea_key.set_value("");
+        let _ = textarea_key.focus();
+        event.stop_immediate_propagation();
+    }) as Box<dyn FnMut(web_sys::KeyboardEvent)>);
+    let _ = document.add_event_listener_with_callback_and_bool(
+        "keydown",
+        key_closure.as_ref().unchecked_ref(),
+        true,
+    );
+    key_closure.forget();
+
+    let document_for_paste = document.clone();
+    let closure = Closure::wrap(Box::new(move |event: web_sys::ClipboardEvent| {
+        let Some(data) = event.clipboard_data() else {
+            return;
+        };
+        let text = data
+            .get_data("text/plain")
+            .ok()
+            .filter(|text| !text.is_empty())
+            .or_else(|| data.get_data("text").ok())
+            .filter(|text| !text.is_empty());
+        if text.is_some() {
+            let _ = sender.try_send(Message::WebPaste(text));
+            refocus_canvas(&document_for_paste);
+        }
+    }) as Box<dyn FnMut(web_sys::ClipboardEvent)>);
+    let _ = document
+        .add_event_listener_with_callback("paste", closure.as_ref().unchecked_ref());
+    closure.forget();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn hidden_paste_target(document: &web_sys::Document) -> Option<web_sys::HtmlTextAreaElement> {
+    use wasm_bindgen::JsCast;
+
+    let element = document.create_element("textarea").ok()?;
+    let textarea: web_sys::HtmlTextAreaElement = element.dyn_into().ok()?;
+    let style = textarea.style();
+    let _ = style.set_property("position", "fixed");
+    let _ = style.set_property("left", "-9999px");
+    let _ = style.set_property("top", "0");
+    let _ = textarea.set_attribute("aria-hidden", "true");
+    let _ = textarea.set_attribute("tabindex", "-1");
+    document.body()?.append_child(&textarea).ok()?;
+    Some(textarea)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_dom_paste_shortcut(event: &web_sys::KeyboardEvent) -> bool {
+    if event.repeat() || event.alt_key() || !(event.ctrl_key() || event.meta_key()) {
+        return false;
+    }
+    event.key().eq_ignore_ascii_case("v")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn share_paste_armed() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    js_sys::Reflect::get(&window, &wasm_bindgen::JsValue::from_str("__tdSharePaste"))
+        .ok()
+        .is_some_and(|value| value.as_bool() == Some(true))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn refocus_canvas(document: &web_sys::Document) {
+    use wasm_bindgen::JsCast;
+
+    let Some(canvas) = document.query_selector("canvas").ok().flatten() else {
+        return;
+    };
+    if let Ok(canvas) = canvas.dyn_into::<web_sys::HtmlElement>() {
+        let _ = canvas.focus();
+    }
+}
+
+fn set_share_paste_armed(armed: bool) {
+    #[cfg(target_arch = "wasm32")]
+    if let Some(window) = web_sys::window() {
+        let _ = js_sys::Reflect::set(
+            &window,
+            &wasm_bindgen::JsValue::from_str("__tdSharePaste"),
+            &wasm_bindgen::JsValue::from_bool(armed),
+        );
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = armed;
+}
+
 /// Apply a URL hash on startup. Whole-preset strings keep their palettes;
 /// legacy one-machine encodings take the launch palette.
 #[cfg(target_arch = "wasm32")]
@@ -287,10 +511,27 @@ fn on_event(event: Event, status: event::Status, _id: window::Id) -> Option<Mess
     if matches!(key, keyboard::Key::Named(key::Named::Escape)) {
         return Some(Message::Escape);
     }
+    // The text field captures Cmd/Ctrl+V and reads iced's clipboard, which is
+    // empty on wasm. Still deliver the shortcut so we can read the browser clipboard.
+    #[cfg(target_arch = "wasm32")]
+    if !repeat && is_paste_shortcut(&key, modifiers) {
+        return Some(Message::PasteRequested);
+    }
     if status == event::Status::Captured || repeat {
         return None;
     }
     Some(Message::KeyPressed { key, modifiers })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_paste_shortcut(key: &keyboard::Key, modifiers: keyboard::Modifiers) -> bool {
+    if !modifiers.command() || modifiers.alt() {
+        return false;
+    }
+    match key {
+        keyboard::Key::Character(c) => c.eq_ignore_ascii_case("v"),
+        _ => false,
+    }
 }
 
 struct App {
@@ -319,6 +560,9 @@ struct App {
     share_string_draft: String,
     /// Parse/load error shown inside the load dialog. Empty when valid.
     share_string_error: String,
+    /// While this is in the future, an empty field update from iced's wasm
+    /// clipboard (a no-op) must not wipe a real browser paste.
+    share_paste_guard_until: Option<Instant>,
     status: String,
     /// Cached RGBA frame; rebuilt when the map changes.
     pixels: Vec<u8>,
@@ -494,6 +738,10 @@ enum Message {
     CloseShareString,
     ShareStringChanged(String),
     SubmitShareString,
+    /// Cmd/Ctrl+V while the load dialog is open (wasm).
+    PasteRequested,
+    /// Text from the browser clipboard or a `paste` event.
+    WebPaste(Option<String>),
     ToggleDrawingOnly,
     ToggleFullscreen,
     PauseForModeSwitch,
@@ -633,6 +881,7 @@ impl App {
                 share_string_open: false,
                 share_string_draft: String::new(),
                 share_string_error: String::new(),
+                share_paste_guard_until: None,
                 status,
                 pixels,
                 gpu_dirty: Some(init_dirty),
@@ -700,11 +949,14 @@ impl App {
             time::every(frame_period(self.refresh_hz)).map(|_| Message::Tick)
         };
 
-        Subscription::batch([
+        let mut subscriptions = vec![
             tick,
             event::listen_with(on_event),
             window::resize_events().map(|(_id, size)| Message::WindowResized(size)),
-        ])
+        ];
+        #[cfg(target_arch = "wasm32")]
+        subscriptions.push(web_paste_subscription());
+        Subscription::batch(subscriptions)
     }
 
     fn sync_share_texts(&mut self) {
@@ -988,6 +1240,7 @@ impl App {
     fn close_share_string(&mut self) {
         self.share_string_open = false;
         self.share_string_error.clear();
+        set_share_paste_armed(false);
     }
 
     fn toggle_fullscreen() -> Task<Message> {
@@ -1488,11 +1741,19 @@ impl App {
                     return Task::none();
                 };
                 let name = self.program.machines.get(i).map(|m| m.display_name(i));
-                self.status = match name {
-                    Some(name) => format!("Copied {name} encoding to clipboard"),
-                    None => "Copied encoding to clipboard".into(),
-                };
-                clipboard::write(text)
+                match write_clipboard(text) {
+                    Ok(task) => {
+                        self.status = match name {
+                            Some(name) => format!("Copied {name} encoding to clipboard"),
+                            None => "Copied encoding to clipboard".into(),
+                        };
+                        task
+                    }
+                    Err(e) => {
+                        self.status = format!("Copy failed: {e}");
+                        Task::none()
+                    }
+                }
             }
             Message::LoadShare(i) => {
                 let Some(text) = self.share_texts.get(i).cloned() else {
@@ -1515,10 +1776,16 @@ impl App {
                 }
             }
             Message::CopyPatch => match self.patch_string() {
-                Ok(text) => {
-                    self.status = "Copied patch to clipboard".into();
-                    clipboard::write(text)
-                }
+                Ok(text) => match write_clipboard(text) {
+                    Ok(task) => {
+                        self.status = "Copied patch to clipboard".into();
+                        task
+                    }
+                    Err(e) => {
+                        self.status = format!("Copy failed: {e}");
+                        Task::none()
+                    }
+                },
                 Err(e) => {
                     self.status = format!("Copy failed: {e}");
                     Task::none()
@@ -1533,6 +1800,7 @@ impl App {
                 self.share_string_open = true;
                 self.share_string_draft.clear();
                 self.share_string_error.clear();
+                set_share_paste_armed(true);
                 operation::focus(SHARE_STRING_INPUT_ID)
             }
             Message::CloseShareString => {
@@ -1540,8 +1808,35 @@ impl App {
                 Task::none()
             }
             Message::ShareStringChanged(text) => {
+                let guarded = self
+                    .share_paste_guard_until
+                    .is_some_and(|until| Instant::now() < until);
+                if guarded && text.is_empty() {
+                    return Task::none();
+                }
                 self.share_string_draft = text;
                 self.share_string_error.clear();
+                Task::none()
+            }
+            Message::PasteRequested => {
+                #[cfg(target_arch = "wasm32")]
+                if self.share_string_open {
+                    self.share_paste_guard_until =
+                        Some(Instant::now() + Duration::from_millis(400));
+                    if let Some(task) = clipboard_read_task() {
+                        return task;
+                    }
+                }
+                Task::none()
+            }
+            Message::WebPaste(text) => {
+                if self.share_string_open {
+                    if let Some(text) = text {
+                        self.share_string_draft = text;
+                        self.share_string_error.clear();
+                        return operation::focus(SHARE_STRING_INPUT_ID);
+                    }
+                }
                 Task::none()
             }
             Message::SubmitShareString => {
