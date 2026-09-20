@@ -44,6 +44,14 @@ Produce a static site under `dist/` (serve that folder with any static HTTP serv
 trunk build --release
 ```
 
+For GitHub Pages under `https://<user>.github.io/turing_drawing/`, set the public URL so asset paths resolve:
+
+```bash
+trunk build --release --public-url /turing_drawing/
+```
+
+Pushing to `main` runs `.github/workflows/pages.yml`, which builds with Trunk and deploys to GitHub Pages. See that workflow for the required `ATELIER_CHECKOUT_TOKEN` secret (private `atelier` submodule).
+
 Settings and presets persist in the browser's `localStorage`. Share encodings in the URL hash (e.g. `https://example.com/#3,3,0,0,...`) load on startup, matching the original web demo.
 ## Controls
 
