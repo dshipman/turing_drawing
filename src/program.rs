@@ -20,10 +20,10 @@ pub use crate::machine::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ScheduleMode {
-    /// Each machine steps at `step_rate(speed)` independently (default).
-    #[default]
+    /// Each machine steps at `step_rate(speed)` independently.
     Absolute,
-    /// Active machines share a fixed budget of 1.0 steps/round, split by weight.
+    /// Active machines share a fixed budget of 1.0 steps/round, split by weight (default).
+    #[default]
     Normalised,
 }
 
@@ -135,7 +135,7 @@ impl Program {
             machines: vec![machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
-            schedule_mode: ScheduleMode::Absolute,
+            schedule_mode: ScheduleMode::Normalised,
             allow_diagonals,
             speed_snapshots: Vec::new(),
             speed_snapshot_key: 0,
@@ -166,7 +166,7 @@ impl Program {
             machines: vec![parsed.machine],
             itr_count: 0,
             tape_init: TapeInit::default(),
-            schedule_mode: ScheduleMode::Absolute,
+            schedule_mode: ScheduleMode::Normalised,
             allow_diagonals,
             speed_snapshots: Vec::new(),
             speed_snapshot_key: 0,

@@ -624,7 +624,7 @@ fn default_map_height() -> usize {
     DEFAULT_MAP_HEIGHT
 }
 fn default_speed() -> f32 {
-    1.0
+    0.5
 }
 fn default_refresh_hz() -> u32 {
     DEFAULT_REFRESH_HZ
@@ -666,7 +666,7 @@ impl Default for PanelDefaults {
             speed: default_speed(),
             refresh_hz: default_refresh_hz(),
             max_itrs: default_max_itrs(),
-            schedule_mode: ScheduleMode::Absolute,
+            schedule_mode: ScheduleMode::Normalised,
             allow_diagonals: false,
             raster_mode: RasterMode::Gpu,
             palette_kind: PaletteKind::Classic,

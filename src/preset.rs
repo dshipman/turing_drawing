@@ -227,7 +227,7 @@ impl Program {
             machines,
             itr_count: 0,
             tape_init,
-            schedule_mode: ScheduleMode::Absolute,
+            schedule_mode: ScheduleMode::Normalised,
             allow_diagonals: preset.allow_diagonals,
             speed_snapshots,
             speed_snapshot_key: 0,
